@@ -21,6 +21,7 @@ from typing import Any
 from zipf.clock import now, to_iso
 from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
+from zipf.services.cluster import Cluster, cluster_rows
 from zipf.sources.dataforseo import labs
 
 #: How long a measured volume is trusted. Matches the capability TTL: the
@@ -118,8 +119,8 @@ def enqueue(conn: sqlite3.Connection, volume_plan: VolumePlan) -> list[int]:
     ]
 
 
-def read(conn: sqlite3.Connection, keywords: Sequence[str]) -> list[dict[str, Any]]:
-    """Read whatever the projection currently holds for these keywords."""
+def read_rows(conn: sqlite3.Connection, keywords: Sequence[str]) -> list[dict[str, Any]]:
+    """Read whatever the projection currently holds, one row per keyword."""
     if not keywords:
         return []
 
@@ -131,3 +132,17 @@ def read(conn: sqlite3.Connection, keywords: Sequence[str]) -> list[dict[str, An
         tuple(keywords),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def read(
+    conn: sqlite3.Connection, keywords: Sequence[str], limit: int | None = None
+) -> list[Cluster]:
+    """Volume results with restatements of one query collapsed together.
+
+    Clustering is display only. The purchase is deliberately *not* deduplicated:
+    the marginal cost of a redundant row is $0.00012 against a $0.012 per-call
+    base, so collapsing the batch would save fractions of a cent while throwing
+    away data for keywords the caller explicitly asked about.
+    """
+    clusters = cluster_rows(read_rows(conn, keywords))
+    return clusters[:limit] if limit else clusters

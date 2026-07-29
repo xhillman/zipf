@@ -76,6 +76,10 @@ class Cluster:
     position: int | None
     url: str | None
     rows: list[dict[str, Any]]
+    #: The member row the representative keyword came from. Carried so callers
+    #: can read columns this dataclass does not model — cpc, competition — with
+    #: out re-deriving which member won.
+    representative: dict[str, Any]
 
     @property
     def variant_count(self) -> int:
@@ -126,6 +130,7 @@ def cluster_rows(rows: Iterable[dict[str, Any]]) -> list[Cluster]:
                 position=min(positions) if positions else None,
                 url=best.get("url"),
                 rows=members,
+                representative=best,
             )
         )
 

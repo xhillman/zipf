@@ -83,20 +83,55 @@ def _drain(conn: sqlite3.Connection) -> None:
     )
 
 
-def _print_volumes(rows: list[dict[str, Any]]) -> None:
-    if not rows:
+def _number(value: float | None, fmt: str = ",") -> str:
+    return f"{value:{fmt}}" if value is not None else "[dim]—[/]"
+
+
+def _money(value: float | None) -> str:
+    return f"${value:.2f}" if value is not None else "[dim]—[/]"
+
+
+def _print_volumes(clusters: list[Cluster], total_rows: int) -> None:
+    if not clusters:
         console.print("[dim]nothing stored for these keywords yet[/]")
         return
-    table = Table(title=f"{len(rows)} keyword(s)")
+
+    collapsed = total_rows - len(clusters)
+    title = f"{len(clusters)} distinct quer{'y' if len(clusters) == 1 else 'ies'}"
+    if collapsed:
+        title += f" · {collapsed} restatement(s) collapsed"
+
+    table = Table(title=title)
+    table.add_column("keyword")
+    table.add_column("volume", justify="right")
+    table.add_column("cpc", justify="right")
+    table.add_column("comp", justify="right")
+    table.add_column("also", justify="right", style="dim")
+    for cluster in clusters:
+        best = cluster.representative
+        table.add_row(
+            cluster.keyword,
+            _number(cluster.volume),
+            _money(best.get("cpc")),
+            _number(best.get("competition"), ".2f"),
+            f"+{cluster.variant_count - 1}" if cluster.has_variants else "",
+        )
+    console.print(table)
+
+
+def _print_volumes_flat(rows: list[dict[str, Any]]) -> None:
+    table = Table(title=f"{len(rows)} keyword(s), every phrasing")
     table.add_column("keyword")
     table.add_column("volume", justify="right")
     table.add_column("cpc", justify="right")
     table.add_column("comp", justify="right")
     for row in rows:
-        volume = f"{row['volume']:,}" if row["volume"] is not None else "[dim]—[/]"
-        cpc = f"${row['cpc']:.2f}" if row["cpc"] is not None else "[dim]—[/]"
-        comp = f"{row['competition']:.2f}" if row["competition"] is not None else "[dim]—[/]"
-        table.add_row(row["keyword"], volume, cpc, comp)
+        table.add_row(
+            row["keyword"],
+            _number(row["volume"]),
+            _money(row["cpc"]),
+            _number(row["competition"], ".2f"),
+        )
     console.print(table)
 
 
@@ -293,6 +328,7 @@ def vol(
     yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
     force: bool = typer.Option(False, "--force", help="Re-buy even keywords that are still fresh."),
     wait: bool = typer.Option(False, "--wait", help="Drain the queue before returning."),
+    flat: bool = typer.Option(False, "--flat", help="Show every phrasing, uncollapsed."),
 ) -> None:
     """Search volume for keywords. Tier 1, paid.
 
@@ -330,7 +366,11 @@ def vol(
             console.print("[yellow]cancelled[/] nothing queued, nothing spent")
             return
 
-        _print_volumes(volume_service.read(conn, plan.requested))
+        rows = volume_service.read_rows(conn, plan.requested)
+        if flat:
+            _print_volumes_flat(rows)
+        else:
+            _print_volumes(volume_service.read(conn, plan.requested), len(rows))
 
     _with_db_sync(run)
 

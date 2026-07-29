@@ -155,3 +155,56 @@ def test_gap_read_returns_clusters(db: sqlite3.Connection) -> None:
 
     assert all(isinstance(c, Cluster) for c in clusters)
     assert len(clusters) == 2
+
+
+def _seed_keyword(
+    conn: sqlite3.Connection, keyword: str, volume: int | None, cpc: float | None = None
+) -> None:
+    conn.execute(
+        "INSERT INTO keyword (keyword, volume, cpc, competition, updated_at) "
+        "VALUES (?, ?, ?, 0.1, '2026-07-01T00:00:00Z')",
+        (keyword, volume, cpc),
+    )
+
+
+def test_volume_read_clusters_restatements(db: sqlite3.Connection) -> None:
+    from zipf.services import volume
+
+    for keyword in ("html css button", "css html buttons", "button in html with css"):
+        _seed_keyword(db, keyword, 22200)
+    _seed_keyword(db, "css grid", 5400, cpc=13.64)
+
+    requested = ["html css button", "css html buttons", "button in html with css", "css grid"]
+    clusters = volume.read(db, requested)
+
+    assert len(clusters) == 2
+    assert clusters[0].keyword == "html css button"
+    assert clusters[0].variant_count == 3
+    assert clusters[0].volume == 22200
+    assert clusters[1].keyword == "css grid"
+
+
+def test_volume_read_rows_stays_uncollapsed(db: sqlite3.Connection) -> None:
+    """--flat depends on the unclustered read staying available."""
+    from zipf.services import volume
+
+    for keyword in ("html css button", "css html buttons"):
+        _seed_keyword(db, keyword, 22200)
+
+    assert len(volume.read_rows(db, ["html css button", "css html buttons"])) == 2
+
+
+def test_the_representative_carries_its_own_columns(db: sqlite3.Connection) -> None:
+    """cpc and competition must come from the winning row, not another variant."""
+    from zipf.services import volume
+
+    _seed_keyword(db, "css grid", 5400, cpc=13.64)
+    _seed_keyword(db, "grid css", 5400, cpc=99.99)
+
+    clusters = volume.read(db, ["css grid", "grid css"])
+
+    assert len(clusters) == 1
+    # Equal length and no position, so the tie breaks alphabetically.
+    assert clusters[0].keyword == "css grid"
+    assert clusters[0].representative["keyword"] == "css grid"
+    assert clusters[0].representative["cpc"] == 13.64, "cpc came from the losing variant"
