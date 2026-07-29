@@ -11,3 +11,6 @@ wheels/
 
 .env
 dev/
+
+AGENTS.md
+CLAUDE.md

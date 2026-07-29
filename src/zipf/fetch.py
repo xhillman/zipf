@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
+import logging
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -26,9 +26,13 @@ from zipf import capabilities
 from zipf.budget import Budget
 from zipf.capabilities import Capability
 from zipf.clock import from_iso, now, now_iso
+from zipf.config import missing_credentials
 from zipf.db.connection import transaction
-from zipf.errors import CredentialMissingError, VendorError
+from zipf.errors import CredentialMissingError, VendorError, ZipfError
 from zipf.pricing import PriceEstimate
+from zipf.projections.rebuild import project
+
+logger = logging.getLogger(__name__)
 
 # Bounds. Anything sized by the outside world gets a limit and a defined
 # behaviour when the limit is reached (spec §2.5).
@@ -67,6 +71,9 @@ class FetchResult:
     raw_id: int | None = None
     body: bytes | None = None
     age: timedelta | None = None
+    #: Set when the bytes were stored but could not be projected. The fetch
+    #: still succeeded; a rebuild after fixing the projector recovers the rows.
+    projection_error: str | None = None
 
     def parsed(self) -> Any:
         """Run the capability's parser over the body."""
@@ -101,9 +108,10 @@ def hash_params(normalised: Mapping[str, Any]) -> str:
 
 
 def _assert_credentials(cap: Capability) -> None:
-    for variable in cap.requires:
-        if not os.environ.get(variable):
-            raise CredentialMissingError(capability=cap.name, variable=variable)
+    """Fail before the socket if a required credential is not configured."""
+    missing = missing_credentials(cap.requires)
+    if missing:
+        raise CredentialMissingError(capability=cap.name, variable=", ".join(missing))
 
 
 def _lookup_cached(
@@ -114,6 +122,18 @@ def _lookup_cached(
     if row is None:
         return None
     return row, now() - from_iso(row["fetched_at"])
+
+
+async def _build_request(cap: Capability, normalised: Mapping[str, Any]) -> httpx.Request:
+    """Build the request and attach credentials.
+
+    Auth headers are applied here rather than inside ``build`` so that they never
+    reach the params that produced ``params_hash``.
+    """
+    request = cap.build(normalised)
+    if cap.auth is not None:
+        request.headers.update(await cap.auth())
+    return request
 
 
 async def _send(cap: Capability, request: httpx.Request) -> bytes:
@@ -154,9 +174,36 @@ def _persist(
             ),
         )
         raw_id = cursor.lastrowid
-    if raw_id is None:  # pragma: no cover - sqlite always reports a rowid here
-        raise VendorError(capability=cap.name, detail="insert did not return a row id")
+        if raw_id is None:  # pragma: no cover - sqlite always reports a rowid here
+            raise VendorError(capability=cap.name, detail="insert did not return a row id")
+
     return raw_id
+
+
+def _project_without_losing_bytes(conn: sqlite3.Connection, raw_id: int) -> str | None:
+    """Project a stored response, surviving a broken projector.
+
+    The bytes commit before this runs, and a projection failure is reported
+    rather than raised. Vendor schema drift is certain (PRD §14), and the whole
+    reason the cache sits at the HTTP boundary is that a broken parser must cost
+    a rebuild, never a re-purchase. Rolling the insert back would mean paying for
+    bytes and then discarding them, repeatedly, for as long as the parser is
+    wrong.
+
+    Returns an error description if projection failed, otherwise ``None``.
+    """
+    try:
+        with transaction(conn):
+            project(conn, raw_id)
+    except (sqlite3.Error, ZipfError, ValueError, KeyError, TypeError) as exc:
+        logger.warning(
+            "projection failed for raw_response id=%s: %s; bytes are kept, run `zipf db rebuild` "
+            "after fixing the projector",
+            raw_id,
+            exc,
+        )
+        return f"{type(exc).__name__}: {exc}"
+    return None
 
 
 async def fetch(
@@ -171,8 +218,8 @@ async def fetch(
     """Answer a capability request from cache, or buy it once and keep it.
 
     Args:
-        conn: Read-write connection. The insert and its projection share one
-            transaction.
+        conn: Read-write connection. The insert commits before projection, so
+            a broken projector costs a rebuild rather than the purchase.
         capability: Registry name, e.g. ``autocomplete.suggest``.
         params: Request parameters, normalised before hashing.
         budget: Ceiling enforcement.
@@ -222,8 +269,9 @@ async def fetch(
     # 5. Execute and persist.
     guard = _free_semaphore if plan.is_free else _paid_lock
     async with guard:
-        body = await _send(cap, cap.build(normalised))
+        body = await _send(cap, await _build_request(cap, normalised))
         raw_id = _persist(conn, cap, params_hash, normalised, body, plan.usd)
+        projection_error = _project_without_losing_bytes(conn, raw_id)
 
     return FetchResult(
         capability=cap.name,
@@ -235,4 +283,5 @@ async def fetch(
         raw_id=raw_id,
         body=body,
         age=timedelta(0),
+        projection_error=projection_error,
     )

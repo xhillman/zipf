@@ -14,36 +14,79 @@ from pathlib import Path
 import pytest
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "zipf"
-METERED_DOOR = SRC / "fetch.py"
+
+#: The only modules permitted to send. Everything else may build an
+#: ``httpx.Request`` and hand it to ``fetch``.
+#:
+#: ``google_oauth`` is the one documented exception (spec §14): it exchanges
+#: credentials, returns no vendor data, and costs nothing. Adding to this list
+#: means adding an unmetered path to the network, so it is deliberately a
+#: hard-coded list rather than a marker a module can grant itself.
+SENDERS_ALLOWED = {"fetch.py", "sources/google_oauth.py"}
+
+#: Every httpx entry point that performs I/O.
+SENDING_NAMES = {
+    "AsyncClient",
+    "Client",
+    "request",
+    "stream",
+    "get",
+    "post",
+    "put",
+    "patch",
+    "delete",
+    "head",
+    "options",
+}
 
 
 def _python_files() -> list[Path]:
     return sorted(SRC.rglob("*.py"))
 
 
-def _instantiates_async_client(tree: ast.AST) -> bool:
+def _httpx_sends(tree: ast.AST) -> set[str]:
+    """Names of httpx calls that would perform I/O."""
+    found: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == "AsyncClient":
-            return True
-        if isinstance(func, ast.Name) and func.id == "AsyncClient":
-            return True
-    return False
+        # Only attribute access on the httpx module counts: `request.get(...)`
+        # on some other object is not a network call.
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "httpx"
+            and func.attr in SENDING_NAMES
+        ):
+            found.add(f"httpx.{func.attr}")
+    return found
 
 
-def test_r1_only_fetch_opens_the_network() -> None:
+def test_r1_only_the_metered_door_reaches_the_network() -> None:
     """R1: one metered door, no side entrances.
 
-    Adapters may build an ``httpx.Request``; only ``fetch`` may send one.
+    Adapters may build an ``httpx.Request``; only an allowlisted module may send.
     """
-    offenders = [
-        path.relative_to(SRC).as_posix()
-        for path in _python_files()
-        if path != METERED_DOOR and _instantiates_async_client(ast.parse(path.read_text()))
-    ]
-    assert offenders == [], f"httpx.AsyncClient instantiated outside fetch.py: {offenders}"
+    offenders: dict[str, set[str]] = {}
+    for path in _python_files():
+        relative = path.relative_to(SRC).as_posix()
+        if relative in SENDERS_ALLOWED:
+            continue
+        sends = _httpx_sends(ast.parse(path.read_text()))
+        if sends:
+            offenders[relative] = sends
+
+    assert offenders == {}, f"network calls outside the allowlist: {offenders}"
+
+
+def test_r1_detector_is_not_vacuous() -> None:
+    """A test that can never fail protects nothing."""
+    planted = ast.parse("import httpx\nhttpx.post('https://example.com')")
+    assert _httpx_sends(planted) == {"httpx.post"}
+
+    innocent = ast.parse("import httpx\nr = httpx.Request('GET', 'https://example.com')")
+    assert _httpx_sends(innocent) == set()
 
 
 @pytest.mark.parametrize(

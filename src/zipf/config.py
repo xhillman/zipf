@@ -12,6 +12,7 @@ they are never read from the TOML file.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -95,6 +96,11 @@ class Settings(BaseSettings):
     monthly_ceiling_usd: float = Field(default=20.0, gt=0)
     confirm_threshold_usd: float = Field(default=0.25, ge=0)
     own_domain: str | None = None
+    #: Search Console property, exactly as it appears there: either
+    #: ``sc-domain:example.com`` or ``https://example.com/``. The two are
+    #: different properties with different data, so this is not derived from
+    #: ``own_domain``.
+    gsc_site_url: str | None = None
 
     llm: LlmSettings = Field(default_factory=LlmSettings)
 
@@ -141,6 +147,7 @@ DEFAULT_CONFIG_TOML = """\
 monthly_ceiling_usd   = 20.0
 confirm_threshold_usd = 0.25
 # own_domain          = "example.com"
+# gsc_site_url        = "sc-domain:example.com"
 
 [llm]
 models = ["claude-opus-5", "gpt-5", "gemini-2.5-pro"]
@@ -151,3 +158,21 @@ n      = 5
 def load_settings(**overrides: Any) -> Settings:
     """Load settings, applying any explicit overrides at the highest precedence."""
     return Settings(**overrides)
+
+
+def missing_credentials(variables: Sequence[str]) -> list[str]:
+    """Return the names in ``variables`` that resolve to nothing.
+
+    Resolution goes through :class:`Settings`, not ``os.environ``. Credentials
+    normally live in ``.env``, which the process environment never sees, so
+    checking ``os.environ`` directly would report a configured key as missing.
+    """
+    settings = load_settings()
+    by_alias = {(field.alias or name): name for name, field in Settings.model_fields.items()}
+
+    missing: list[str] = []
+    for variable in variables:
+        attribute = by_alias.get(variable)
+        if attribute is None or not getattr(settings, attribute, None):
+            missing.append(variable)
+    return missing
