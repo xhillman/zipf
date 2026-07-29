@@ -24,6 +24,7 @@ from zipf.errors import CredentialMissingError, ZipfError
 from zipf.jobs import queue as job_queue
 from zipf.jobs.runner import JobRunner
 from zipf.projections.rebuild import rebuild as rebuild_projections
+from zipf.services import budget as budget_service
 from zipf.services import gap as gap_service
 from zipf.services import gsc as gsc_service
 from zipf.services import suggest as suggest_service
@@ -407,17 +408,45 @@ def jobs_cancel(
         console.print(f"[yellow]not cancelled[/] job {job_id} is not queued")
 
 
-@app.command()
-def budget() -> None:
-    """Month-to-date spend against the ceiling."""
-    limits = _budget()
-    with connect(Paths.resolve().db_file, read_only=True) as conn:
-        spent = limits.spent_this_month(conn)
+def _meter(fraction: float, width: int = 10) -> str:
+    filled = min(width, max(0, int(fraction * width)))
+    return "▓" * filled + "░" * (width - filled)
 
-    pct = spent / limits.ceiling_usd if limits.ceiling_usd else 0.0
-    filled = min(10, int(pct * 10))
-    meter = "▓" * filled + "░" * (10 - filled)
-    console.print(f"${spent:.2f}/${limits.ceiling_usd:.2f}  {meter}  {pct:.0%}")
+
+@app.command()
+def budget(
+    cached: bool = typer.Option(False, "--cached", help="Skip the free vendor balance lookup."),
+) -> None:
+    """Spend against the ceiling, and the vendor balance that actually limits it."""
+    limits = _budget()
+
+    async def work(conn: sqlite3.Connection) -> Any:
+        return await budget_service.status(conn, limits, refresh=not cached)
+
+    state = _with_db(work)
+
+    used = state.spent / state.ceiling if state.ceiling else 0.0
+    console.print(
+        f"spent    ${state.spent:.2f}/${state.ceiling:.2f}  {_meter(used)}  {used:.0%} of ceiling"
+    )
+
+    if state.balance is not None:
+        age = "" if cached else " [dim]live[/]"
+        if state.balance_age and state.balance_age.total_seconds() > 60:
+            age = f" [dim]{state.balance_age.total_seconds() / 60:.0f}m old[/]"
+        console.print(f"balance  ${state.balance:.2f} at DataForSEO{age}")
+
+    if state.ceiling_exceeds_balance:
+        console.print(
+            f"[yellow]ceiling is decorative[/] ${state.ceiling:.2f} allowed but only "
+            f"${state.balance:.2f} funded; the real stop is ${state.effective_limit:.2f}"
+        )
+
+    gate = "every spend" if state.threshold <= 0 else f"spends over ${state.threshold:.2f}"
+    console.print(f"[dim]confirms {gate}[/]")
+
+    if state.balance_error:
+        console.print(f"[yellow]balance lookup failed[/] {state.balance_error}")
 
 
 def main() -> None:

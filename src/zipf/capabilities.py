@@ -20,6 +20,7 @@ import httpx
 from zipf.errors import CapabilityUnknownError
 from zipf.pricing import PriceEstimate
 from zipf.sources import autocomplete, google_oauth, gsc
+from zipf.sources.dataforseo import account as dfs_account
 from zipf.sources.dataforseo import client as dfs_client
 from zipf.sources.dataforseo import labs
 
@@ -89,6 +90,16 @@ REGISTRY: dict[str, Capability] = {
         price=gsc.price_sites,
         requires=("GSC_CLIENT_ID", "GSC_CLIENT_SECRET"),
         auth=google_oauth.auth_headers,
+    ),
+    dfs_account.CAPABILITY: Capability(
+        name=dfs_account.CAPABILITY,
+        tier=0,
+        ttl=timedelta(minutes=15),
+        build=dfs_account.build,
+        parse=dfs_account.parse,
+        price=dfs_account.price,
+        requires=("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
+        validate=dfs_account.validate,
     ),
     labs.SEARCH_VOLUME: Capability(
         name=labs.SEARCH_VOLUME,

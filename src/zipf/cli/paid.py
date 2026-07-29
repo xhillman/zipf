@@ -20,6 +20,7 @@ from rich.panel import Panel
 
 from zipf.budget import Budget
 from zipf.pricing import PriceEstimate
+from zipf.services.budget import cached_balance
 
 console = Console()
 
@@ -52,6 +53,14 @@ def confirm_spend(
         f"  [bold]${estimate.usd:.4f}[/]{'':<15} tier {estimate.tier}, {estimate.queue} queue\n"
         f"  remaining this month: ${remaining:.2f}"
     )
+
+    # The vendor balance is the limit that actually bites. Read from cache: the
+    # gate must stay fast and must still work with no network.
+    balance, _age = cached_balance(conn)
+    if balance is not None:
+        marker = "[red]" if estimate.usd > balance else ""
+        close = "[/]" if marker else ""
+        body += f"\n  vendor balance:       {marker}${balance:.2f}{close}"
     if detail:
         body = f"  {detail}\n{body}"
 

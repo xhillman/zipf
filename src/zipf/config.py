@@ -94,7 +94,9 @@ class Settings(BaseSettings):
     )
 
     monthly_ceiling_usd: float = Field(default=20.0, gt=0)
-    confirm_threshold_usd: float = Field(default=0.25, ge=0)
+    #: 0.0 confirms every spend. Any tier-1 call costs at least the vendor's
+    #: per-call base, so a threshold below that base gates nothing extra.
+    confirm_threshold_usd: float = Field(default=0.0, ge=0)
     own_domain: str | None = None
     #: Search Console property, exactly as it appears there: either
     #: ``sc-domain:example.com`` or ``https://example.com/``. The two are
@@ -145,7 +147,7 @@ DEFAULT_CONFIG_TOML = """\
 # Zipf configuration. Secrets belong in the environment or .env, never here.
 
 monthly_ceiling_usd   = 20.0
-confirm_threshold_usd = 0.25
+confirm_threshold_usd = 0.0
 # own_domain          = "example.com"
 # gsc_site_url        = "sc-domain:example.com"
 
