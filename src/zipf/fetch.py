@@ -270,7 +270,17 @@ async def fetch(
     guard = _free_semaphore if plan.is_free else _paid_lock
     async with guard:
         body = await _send(cap, await _build_request(cap, normalised))
-        raw_id = _persist(conn, cap, params_hash, normalised, body, plan.usd)
+
+        # Validate before persisting. A vendor error that reached us as HTTP 200
+        # must not enter the cache, or it is served for the rest of the TTL.
+        if cap.validate is not None:
+            cap.validate(body)
+
+        # Prefer what the vendor says it charged over what we predicted.
+        charged = cap.cost_from_response(body) if cap.cost_from_response else None
+        cost_usd = charged if charged is not None else plan.usd
+
+        raw_id = _persist(conn, cap, params_hash, normalised, body, cost_usd)
         projection_error = _project_without_losing_bytes(conn, raw_id)
 
     return FetchResult(
@@ -279,7 +289,7 @@ async def fetch(
         params=normalised,
         plan=plan,
         cached=False,
-        cost_usd=plan.usd,
+        cost_usd=cost_usd,
         raw_id=raw_id,
         body=body,
         age=timedelta(0),

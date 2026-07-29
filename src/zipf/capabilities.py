@@ -20,11 +20,15 @@ import httpx
 from zipf.errors import CapabilityUnknownError
 from zipf.pricing import PriceEstimate
 from zipf.sources import autocomplete, google_oauth, gsc
+from zipf.sources.dataforseo import client as dfs_client
+from zipf.sources.dataforseo import labs
 
 type RequestBuilder = Callable[[Mapping[str, Any]], httpx.Request]
 type Parser = Callable[[bytes, Mapping[str, Any]], Any]
 type PriceFn = Callable[[Mapping[str, Any]], PriceEstimate]
 type AuthProvider = Callable[[], Awaitable[Mapping[str, str]]]
+type Validator = Callable[[bytes], None]
+type CostReader = Callable[[bytes], float | None]
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,15 @@ class Capability:
     price: PriceFn
     #: Environment variables that must be set before this capability can run.
     requires: tuple[str, ...] = ()
+    #: Rejects a vendor-level error before the response is cached.
+    #:
+    #: Some vendors report failure with HTTP 200 and an error code in the body.
+    #: Without this hook such a response would be persisted and then served from
+    #: cache for the whole TTL, turning one bad call into a stale wrong answer.
+    validate: Validator | None = None
+    #: Reads the amount actually charged out of the response, when the vendor
+    #: reports it. Falls back to the estimate when absent.
+    cost_from_response: CostReader | None = None
     #: Returns headers to merge into the request, e.g. a bearer token.
     #:
     #: Auth is deliberately separate from ``build`` because credentials must not
@@ -76,6 +89,39 @@ REGISTRY: dict[str, Capability] = {
         price=gsc.price_sites,
         requires=("GSC_CLIENT_ID", "GSC_CLIENT_SECRET"),
         auth=google_oauth.auth_headers,
+    ),
+    labs.SEARCH_VOLUME: Capability(
+        name=labs.SEARCH_VOLUME,
+        tier=1,
+        ttl=timedelta(days=30),  # the upstream updates monthly anyway
+        build=labs.build_search_volume,
+        parse=labs.parse_search_volume,
+        price=labs.price_search_volume,
+        requires=("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
+        validate=lambda body: dfs_client.validate(labs.SEARCH_VOLUME, body),
+        cost_from_response=dfs_client.actual_cost,
+    ),
+    labs.RANKED_KEYWORDS: Capability(
+        name=labs.RANKED_KEYWORDS,
+        tier=1,
+        ttl=timedelta(days=7),
+        build=labs.build_ranked_keywords,
+        parse=labs.parse_ranked_keywords,
+        price=labs.price_ranked_keywords,
+        requires=("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
+        validate=lambda body: dfs_client.validate(labs.RANKED_KEYWORDS, body),
+        cost_from_response=dfs_client.actual_cost,
+    ),
+    labs.DOMAIN_INTERSECTION: Capability(
+        name=labs.DOMAIN_INTERSECTION,
+        tier=1,
+        ttl=timedelta(days=7),
+        build=labs.build_domain_intersection,
+        parse=labs.parse_domain_intersection,
+        price=labs.price_domain_intersection,
+        requires=("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
+        validate=lambda body: dfs_client.validate(labs.DOMAIN_INTERSECTION, body),
+        cost_from_response=dfs_client.actual_cost,
     ),
 }
 
