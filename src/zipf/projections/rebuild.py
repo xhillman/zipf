@@ -13,15 +13,23 @@ import sqlite3
 from dataclasses import dataclass
 
 from zipf.db.connection import transaction
-from zipf.projections import gsc_query, keyword
+from zipf.projections import domain_keyword, gsc_query, keyword
 from zipf.projections.base import Projector
 
 PROJECTORS: dict[str, Projector] = {
     keyword.AUTOCOMPLETE.capability: keyword.AUTOCOMPLETE,
     gsc_query.SEARCH_ANALYTICS.capability: gsc_query.SEARCH_ANALYTICS,
+    keyword.SEARCH_VOLUME.capability: keyword.SEARCH_VOLUME,
+    domain_keyword.RANKED_KEYWORDS.capability: domain_keyword.RANKED_KEYWORDS,
+    domain_keyword.DOMAIN_INTERSECTION.capability: domain_keyword.DOMAIN_INTERSECTION,
 }
 
-_SELECT_ONE = "SELECT id, capability, body, fetched_at FROM raw_response WHERE id = ?"
+# params_json is selected because some projections cannot be derived from the
+# body alone: a domain intersection response lists positions without naming
+# which domain each belongs to.
+_COLUMNS = "id, capability, body, fetched_at, params_json"
+
+_SELECT_ONE = f"SELECT {_COLUMNS} FROM raw_response WHERE id = ?"
 
 # Deterministic replay order. fetched_at alone is not enough: two rows can share
 # a second, and a rebuild that reorders them is a rebuild that can disagree with
@@ -108,7 +116,7 @@ def rebuild(conn: sqlite3.Connection, capability: str | None = None) -> RebuildS
             conn.execute(f"DELETE FROM {table}")
 
         rows = conn.execute(
-            f"SELECT id, capability, body, fetched_at FROM raw_response "
+            f"SELECT {_COLUMNS} FROM raw_response "
             f"WHERE capability IN ({placeholders}) {_REPLAY_ORDER}",
             names,
         ).fetchall()
