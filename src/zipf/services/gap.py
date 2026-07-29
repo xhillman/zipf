@@ -18,6 +18,7 @@ from typing import Any
 from zipf.errors import InvalidRequestError
 from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
+from zipf.services.cluster import Cluster, cluster_rows
 from zipf.sources.dataforseo import labs
 
 
@@ -69,10 +70,22 @@ def enqueue(conn: sqlite3.Connection, gap_plan: GapPlan) -> int:
     )
 
 
-def read(
-    conn: sqlite3.Connection, competitor: str, mine: str, limit: int = 50
-) -> list[dict[str, Any]]:
-    """Keywords the competitor ranks for and you do not, best volume first.
+#: Only the newest observation of each keyword. ``domain_keyword`` accumulates a
+#: rank history (R4), so without this a second pull would list every keyword once
+#: per pull rather than once with its current rank.
+_LATEST_ONLY = """
+JOIN (
+  SELECT domain, keyword, MAX(observed_at) AS latest
+  FROM domain_keyword GROUP BY domain, keyword
+) newest
+  ON newest.domain = dk.domain
+ AND newest.keyword = dk.keyword
+ AND newest.latest = dk.observed_at
+"""
+
+
+def read_rows(conn: sqlite3.Connection, competitor: str, mine: str) -> list[dict[str, Any]]:
+    """Every current gap keyword, unclustered, best volume first.
 
     The gap is the *absence* of a row for your domain, which is why this is a
     NOT EXISTS rather than a comparison against a position value.
@@ -80,14 +93,24 @@ def read(
     rows = conn.execute(
         "SELECT dk.keyword, dk.position, dk.url, k.volume, k.cpc, dk.observed_at "
         "FROM domain_keyword dk "
+        f"{_LATEST_ONLY} "
         "LEFT JOIN keyword k ON k.keyword = dk.keyword "
         "WHERE dk.domain = ? "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM domain_keyword mine "
         "  WHERE mine.domain = ? AND mine.keyword = dk.keyword"
         ") "
-        "ORDER BY CASE WHEN k.volume IS NULL THEN 1 ELSE 0 END, k.volume DESC, dk.position "
-        "LIMIT ?",
-        (competitor.strip().lower(), mine.strip().lower(), limit),
+        "ORDER BY CASE WHEN k.volume IS NULL THEN 1 ELSE 0 END, k.volume DESC, dk.position",
+        (competitor.strip().lower(), mine.strip().lower()),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def read(conn: sqlite3.Connection, competitor: str, mine: str, limit: int = 50) -> list[Cluster]:
+    """Gap keywords with restatements of the same query collapsed together.
+
+    ``limit`` counts distinct queries, not rows. A hundred bought rows can be
+    twenty real opportunities, and the count that matters is the one you could
+    actually write about.
+    """
+    return cluster_rows(read_rows(conn, competitor, mine))[:limit]

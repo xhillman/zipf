@@ -29,6 +29,7 @@ from zipf.services import gap as gap_service
 from zipf.services import gsc as gsc_service
 from zipf.services import suggest as suggest_service
 from zipf.services import volume as volume_service
+from zipf.services.cluster import Cluster
 from zipf.sources import gsc as gsc_source
 
 app = typer.Typer(
@@ -99,18 +100,43 @@ def _print_volumes(rows: list[dict[str, Any]]) -> None:
     console.print(table)
 
 
-def _print_gap(rows: list[dict[str, Any]]) -> None:
-    if not rows:
+def _print_gap(clusters: list[Cluster], total_rows: int) -> None:
+    if not clusters:
         console.print("[dim]no gap rows stored yet; run the job first[/]")
         return
-    table = Table(title=f"{len(rows)} gap keyword(s)")
+
+    collapsed = total_rows - len(clusters)
+    title = f"{len(clusters)} distinct quer{'y' if len(clusters) == 1 else 'ies'}"
+    if collapsed:
+        title += f" · {collapsed} restatement(s) collapsed"
+
+    table = Table(title=title)
     table.add_column("keyword")
     table.add_column("vol", justify="right")
     table.add_column("pos", justify="right")
+    table.add_column("also", justify="right", style="dim")
     table.add_column("their url")
+    for cluster in clusters:
+        volume = f"{cluster.volume:,}" if cluster.volume is not None else "[dim]—[/]"
+        also = f"+{cluster.variant_count - 1}" if cluster.has_variants else ""
+        table.add_row(
+            cluster.keyword,
+            volume,
+            str(cluster.position) if cluster.position is not None else "—",
+            also,
+            (cluster.url or "")[:46],
+        )
+    console.print(table)
+
+
+def _print_gap_flat(rows: list[dict[str, Any]]) -> None:
+    table = Table(title=f"{len(rows)} gap keyword(s), every phrasing")
+    table.add_column("keyword")
+    table.add_column("vol", justify="right")
+    table.add_column("pos", justify="right")
     for row in rows:
         volume = f"{row['volume']:,}" if row["volume"] is not None else "[dim]—[/]"
-        table.add_row(row["keyword"], volume, str(row["position"]), (row["url"] or "")[:52])
+        table.add_row(row["keyword"], volume, str(row["position"]))
     console.print(table)
 
 
@@ -319,6 +345,7 @@ def gap(
     dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan and the bill. Spend $0."),
     yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
     wait: bool = typer.Option(False, "--wait", help="Drain the queue before returning."),
+    flat: bool = typer.Option(False, "--flat", help="Show every phrasing, uncollapsed."),
 ) -> None:
     """Keywords a competitor ranks for and you do not. Tier 1, paid."""
     own = mine or load_settings().own_domain
@@ -349,7 +376,11 @@ def gap(
             console.print("[yellow]cancelled[/] nothing queued, nothing spent")
             return
 
-        _print_gap(gap_service.read(conn, plan.competitor, plan.mine))
+        rows = gap_service.read_rows(conn, plan.competitor, plan.mine)
+        if flat:
+            _print_gap_flat(rows)
+        else:
+            _print_gap(gap_service.read(conn, plan.competitor, plan.mine), len(rows))
 
     _with_db_sync(run)
 
