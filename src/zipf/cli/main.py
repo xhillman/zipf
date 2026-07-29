@@ -9,20 +9,25 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from zipf.budget import Budget
+from zipf.cli.paid import confirm_spend
 from zipf.config import DEFAULT_CONFIG_TOML, Paths, load_settings
 from zipf.db.connection import connect
 from zipf.db.migrate import migrate
 from zipf.errors import CredentialMissingError, ZipfError
+from zipf.jobs import queue as job_queue
+from zipf.jobs.runner import JobRunner
 from zipf.projections.rebuild import rebuild as rebuild_projections
+from zipf.services import gap as gap_service
 from zipf.services import gsc as gsc_service
 from zipf.services import suggest as suggest_service
+from zipf.services import volume as volume_service
 from zipf.sources import gsc as gsc_source
 
 app = typer.Typer(
@@ -33,8 +38,10 @@ app = typer.Typer(
 )
 db_app = typer.Typer(name="db", help="Database maintenance.", no_args_is_help=True)
 gsc_app = typer.Typer(name="gsc", help="Search Console. Free, so refreshed greedily.")
+jobs_app = typer.Typer(name="jobs", help="The work queue. Paid work runs here, never inline.")
 app.add_typer(db_app)
 app.add_typer(gsc_app)
+app.add_typer(jobs_app)
 
 console = Console()
 
@@ -55,6 +62,55 @@ def _with_db[T](work: Callable[[sqlite3.Connection], Coroutine[Any, Any, T]]) ->
             return await work(conn)
 
     return asyncio.run(run())
+
+
+def _with_db_sync(work: Callable[[sqlite3.Connection], None]) -> None:
+    """Run synchronous work against the database, closing it on every path."""
+    with connect(Paths.resolve().db_file) as conn:
+        work(conn)
+
+
+def _drain(conn: sqlite3.Connection) -> None:
+    """Host the runner in the foreground until the queue empties (spec D1)."""
+    runner = JobRunner(
+        conn, _budget(), on_event=lambda message: console.print(f"[dim]{message}[/]")
+    )
+    report = asyncio.run(runner.drain())
+    console.print(
+        f"[green]{report.done} done[/] · {report.failed} failed · {report.claimed} claimed"
+    )
+
+
+def _print_volumes(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        console.print("[dim]nothing stored for these keywords yet[/]")
+        return
+    table = Table(title=f"{len(rows)} keyword(s)")
+    table.add_column("keyword")
+    table.add_column("volume", justify="right")
+    table.add_column("cpc", justify="right")
+    table.add_column("comp", justify="right")
+    for row in rows:
+        volume = f"{row['volume']:,}" if row["volume"] is not None else "[dim]—[/]"
+        cpc = f"${row['cpc']:.2f}" if row["cpc"] is not None else "[dim]—[/]"
+        comp = f"{row['competition']:.2f}" if row["competition"] is not None else "[dim]—[/]"
+        table.add_row(row["keyword"], volume, cpc, comp)
+    console.print(table)
+
+
+def _print_gap(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        console.print("[dim]no gap rows stored yet; run the job first[/]")
+        return
+    table = Table(title=f"{len(rows)} gap keyword(s)")
+    table.add_column("keyword")
+    table.add_column("vol", justify="right")
+    table.add_column("pos", justify="right")
+    table.add_column("their url")
+    for row in rows:
+        volume = f"{row['volume']:,}" if row["volume"] is not None else "[dim]—[/]"
+        table.add_row(row["keyword"], volume, str(row["position"]), (row["url"] or "")[:52])
+    console.print(table)
 
 
 @app.command()
@@ -199,6 +255,156 @@ def db_rebuild(
         f"{stats.rows_replayed:,} stored response(s) → {stats.rows_written:,} row(s)"
     )
     console.print(f"[dim]capabilities replayed: {', '.join(stats.capabilities)}[/]")
+
+
+@app.command()
+def vol(
+    keywords: Annotated[
+        list[str], typer.Argument(help="Keywords to price. Pass many; batching is cheap.")
+    ],
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan and the bill. Spend $0."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
+    force: bool = typer.Option(False, "--force", help="Re-buy even keywords that are still fresh."),
+    wait: bool = typer.Option(False, "--wait", help="Drain the queue before returning."),
+) -> None:
+    """Search volume for keywords. Tier 1, paid.
+
+    Pass every keyword you care about in one call: Labs charges a per-call base
+    that dwarfs the per-keyword cost, so many small calls are the expensive
+    mistake.
+    """
+
+    def run(conn: sqlite3.Connection) -> None:
+        plan = volume_service.plan(conn, keywords, force=force)
+        console.print(
+            f"[dim]{len(plan.requested)} keyword(s) · {len(plan.cached)} still fresh · "
+            f"{len(plan.stale)} to buy in {len(plan.batches)} call(s)[/]"
+        )
+
+        if plan.is_free:
+            console.print("[green]all cached[/] nothing to buy")
+        elif dry_run:
+            console.print(
+                f"[cyan]dry run[/] would buy {len(plan.stale)} keyword(s) "
+                f"for ${plan.estimate.usd:.5f} · spent $0.00"
+            )
+        elif confirm_spend(
+            conn,
+            _budget(),
+            plan.estimate,
+            what=f"search volume · {len(plan.stale)} keyword(s)",
+            assume_yes=yes,
+        ):
+            job_ids = volume_service.enqueue(conn, plan)
+            console.print(f"[green]queued[/] job(s) {', '.join(str(i) for i in job_ids)}")
+            if wait:
+                _drain(conn)
+        else:
+            console.print("[yellow]cancelled[/] nothing queued, nothing spent")
+            return
+
+        _print_volumes(volume_service.read(conn, plan.requested))
+
+    _with_db_sync(run)
+
+
+@app.command()
+def gap(
+    competitor: str = typer.Argument(..., help="The domain you want to take keywords from."),
+    mine: str = typer.Option(None, "--mine", help="Your domain. Defaults to config own_domain."),
+    limit: int = typer.Option(
+        100, "--limit", help="Rows to buy. You pay for the depth you ask for."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan and the bill. Spend $0."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
+    wait: bool = typer.Option(False, "--wait", help="Drain the queue before returning."),
+) -> None:
+    """Keywords a competitor ranks for and you do not. Tier 1, paid."""
+    own = mine or load_settings().own_domain
+    if not own:
+        raise CredentialMissingError(capability="labs.domain_intersection", variable="own_domain")
+
+    def run(conn: sqlite3.Connection) -> None:
+        plan = gap_service.plan(competitor, own, limit=limit)
+
+        if dry_run:
+            console.print(
+                f"[cyan]dry run[/] would buy up to {plan.limit:,} rows for "
+                f"${plan.estimate.usd:.5f} · spent $0.00"
+            )
+        elif confirm_spend(
+            conn,
+            _budget(),
+            plan.estimate,
+            what=f"keyword gap · {plan.competitor}",
+            detail=f"{plan.competitor} ranks for, {plan.mine} does not",
+            assume_yes=yes,
+        ):
+            job_id = gap_service.enqueue(conn, plan)
+            console.print(f"[green]queued[/] job {job_id}")
+            if wait:
+                _drain(conn)
+        else:
+            console.print("[yellow]cancelled[/] nothing queued, nothing spent")
+            return
+
+        _print_gap(gap_service.read(conn, plan.competitor, plan.mine))
+
+    _with_db_sync(run)
+
+
+@jobs_app.command("run")
+def jobs_run() -> None:
+    """Drain the queue. This is where money is actually spent."""
+
+    def run(conn: sqlite3.Connection) -> None:
+        _drain(conn)
+
+    _with_db_sync(run)
+
+
+@jobs_app.command("list")
+def jobs_list(limit: int = typer.Option(20, "--limit")) -> None:
+    """Recent jobs, newest first."""
+    with connect(Paths.resolve().db_file, read_only=True) as conn:
+        rows = job_queue.recent(conn, limit)
+
+    if not rows:
+        console.print("[dim]no jobs[/]")
+        return
+
+    table = Table(title=f"{len(rows)} recent job(s)")
+    for column in ("id", "capability", "status", "try", "est", "actual"):
+        table.add_column(column)
+    styles = {"done": "green", "failed": "red", "queued": "yellow", "running": "cyan"}
+    for row in rows:
+        actual = f"${row['actual_cost']:.5f}" if row["actual_cost"] is not None else "—"
+        estimate = f"${row['estimated_cost']:.5f}" if row["estimated_cost"] is not None else "—"
+        table.add_row(
+            str(row["id"]),
+            row["capability"],
+            f"[{styles.get(row['status'], 'white')}]{row['status']}[/]",
+            str(row["attempts"]),
+            estimate,
+            actual,
+        )
+    console.print(table)
+    for row in rows:
+        if row["error"]:
+            console.print(f"[red]job {row['id']}[/] {row['error']}")
+
+
+@jobs_app.command("cancel")
+def jobs_cancel(
+    job_id: int = typer.Argument(..., help="Job to cancel. Must not have started."),
+) -> None:
+    """Cancel a queued job."""
+    with connect(Paths.resolve().db_file) as conn:
+        cancelled = job_queue.cancel(conn, job_id)
+    if cancelled:
+        console.print(f"[green]cancelled[/] job {job_id}")
+    else:
+        console.print(f"[yellow]not cancelled[/] job {job_id} is not queued")
 
 
 @app.command()

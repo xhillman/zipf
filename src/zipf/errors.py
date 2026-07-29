@@ -12,6 +12,14 @@ class ZipfError(Exception):
     """Base for every error Zipf raises."""
 
 
+class InvalidRequestError(ZipfError):
+    """A request cannot be satisfied as asked.
+
+    Raised at the service boundary for input the user can correct, so the CLI
+    can print one line instead of a traceback.
+    """
+
+
 class CapabilityUnknownError(ZipfError):
     """A capability name is not in the registry. There is no default TTL."""
 
