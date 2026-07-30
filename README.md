@@ -13,22 +13,29 @@ Every feature is a cache hit; every dollar spent is a cache miss.
 
 ## Status
 
-Working today: **M0–M2**. Free and paid tiers run end to end from the CLI, with
-price declaration, a monthly ceiling, and asynchronous spend.
+Working today: **M0–M2.9**. Free and paid tiers run end to end from the CLI, with
+price declaration, a monthly ceiling, asynchronous spend, and near-duplicate
+keyword clustering.
 
 | Milestone | State |
 |---|---|
 | M0 The metered loop | done |
 | M1 Free tier — autocomplete, Search Console | done |
 | M2 Paid tier — volume, gap, jobs, budget | done |
-| M3 Terminal UI | not started |
+| M2.9 Usability pass | done |
+| M3 Terminal UI | next |
+| M3.5 Litestream backup | not started |
 | M4 SERP and AI Overview | not started |
 | M5 LLM visibility panel | not started |
 | M6 MCP server | not started |
 
 Both paid capabilities have been verified against the live DataForSEO API, with
 recorded cost reconciled against the vendor balance to the cent and zero
-estimator drift.
+estimator drift across every purchase.
+
+**`observation` is still empty.** It is the table where classic rank and LLM
+visibility meet in one shape, which is the thing a subscription cannot do — and
+it stays empty until M4 and M5.
 
 ---
 
@@ -70,50 +77,95 @@ outlive 7 days; in *testing* status Google expires them weekly.
 
 ## Commands
 
-Free commands never prompt. Paid commands price the request first, confirm, then
-enqueue — nothing spends money inline.
-
 ```
-zipf init                                    create db, run migrations, scaffold config
+zipf init                                        create db, run migrations, scaffold config
 zipf suggest <seed> [--questions] [--alphabet]   tier 0, free
-zipf gsc auth | sites | import [--days N]    tier 0, free
-zipf vol <keyword>... [--dry-run] [--flat]   tier 1, paid
-zipf gap <competitor> [--mine D] [--limit N] tier 1, paid
-zipf jobs run | list | cancel <id>           the work queue
-zipf budget [--cached]                       spend, ceiling, and vendor balance
-zipf db rebuild [--capability NAME]          replay projections from stored bytes
+zipf gsc auth | sites | import [--days N]        tier 0, free
+zipf vol <keyword>...                            tier 1 — free when already owned
+zipf gap <competitor> [--mine D] [--limit N]     tier 1 — free when already owned
+zipf jobs run | list | show <id> | cancel <id>   the work queue
+zipf budget [--cached]                           what you can still spend
+zipf db stats                                    what the database holds
+zipf db rebuild [--capability NAME]              replay projections from stored bytes
 ```
 
-Paid commands take `--dry-run` (print the plan, spend $0), `--yes` (skip the
-prompt), `--force` (ignore a fresh cache entry), and `--wait` (drain the queue
-before returning).
+**Reading data you already own is always free and never prompts.** `vol` and
+`gap` check what is stored first; you are asked to pay only for what is missing
+or past its TTL. Every command ends with a line naming what changed and what it
+cost, and cost is measured from the ledger rather than predicted, so a command
+and `zipf budget` cannot disagree.
 
-### Example
+Flags on `vol` and `gap`:
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Print the plan and the bill. Spends $0. |
+| `--cached` | Read stored data only. Never prompts, never spends. |
+| `--force` | Re-buy even when a fresh copy is stored. |
+| `--yes` | Skip the confirmation prompt. |
+| `--wait` | Drain the queue before returning. |
+| `--flat` | Show every phrasing instead of collapsing restatements. |
+
+### Reading what you own — free, no prompt
 
 ```console
-$ zipf vol "best crm software" --dry-run
-1 keyword(s) · 0 still fresh · 1 to buy in 1 call(s)
-dry run would buy 1 keyword(s) for $0.01212 · spent $0.00
-
-$ zipf gap joshwcomeau.com --limit 100
-╭─ pull keyword gap · joshwcomeau.com ──────────╮
-│   joshwcomeau.com ranks for, mine.dev does not│
-│   ~100 rows              not cached           │
-│   $0.0240                tier 1, none queue   │
-│   remaining this month: $19.99                │
-│   vendor balance:       $0.95                 │
-╰───────────────────────────────────────────────╯
-pull [y/N]: y
-queued job 3
-
-$ zipf jobs run
-job 3 done: labs.domain_intersection · $0.02400
-
-$ zipf budget
-spent    $0.04/$20.00  ░░░░░░░░░░  0% of ceiling
-balance  $0.93 at DataForSEO live
-confirms every spend
+$ zipf gap joshwcomeau.com
+cached pulled 1.0d ago · nothing to buy · $0.00
+               50 distinct queries · 50 restatement(s) collapsed
+┃ keyword                 ┃     vol ┃ pos ┃ also ┃ their url          ┃
+│ game button css         │ 135,000 │   2 │   +1 │ joshwcomeau.com/…  │
+│ bottom shadow css       │   9,900 │   6 │   +3 │ joshwcomeau.com/…  │
+→ 50 distinct queries from 100 rows · joshwcomeau.com not matched by you · $0.00
 ```
+
+`also +3` means three further phrasings of the same query were collapsed into
+that row. A real 100-row pull was half restatements.
+
+### Buying something new
+
+```console
+$ zipf gap css-tricks.com --limit 100
+╭─ pull keyword gap · css-tricks.com ────────────╮
+│   css-tricks.com ranks for, xhillman.dev does not
+│   ~100 rows              not cached            │
+│   $0.0240                tier 1, none queue    │
+│   remaining this month: $19.95                 │
+│   vendor balance:       $0.91                  │
+╰────────────────────────────────────────────────╯
+pull [y/N]: y
+queued job 5
+
+$ zipf jobs run          # money moves here, never at the prompt
+job 5 done: labs.domain_intersection · $0.02400
+→ 1 done · $0.02400
+```
+
+### Where the money is
+
+```console
+$ zipf budget
+$0.91 available  ▒░░░░░░░░░  5% used
+  limited by your DataForSEO balance, not the $20.00 monthly ceiling
+
+  spent this month  $0.04836 of $20.00
+  vendor balance    $0.91 at DataForSEO live
+  confirms          every spend
+
+$ zipf jobs list
+ id │ what                         │ kind │ status    │ when │      cost
+  4 │ hugo vs eleventy +1          │ vol  │ done      │  49m │  $0.01224
+  3 │ joshwcomeau.com vs xhillman… │ gap  │ done      │  21h │  $0.02400
+  1 │ ahrefs.com vs xhillman.dev   │ gap  │ cancelled │  22h │ ~$0.13200
+```
+
+The headline is the smaller of your monthly ceiling and your vendor balance,
+because that is the number that is actually true. The meter measures spend
+against that headroom, not against the ceiling — a $20 ceiling would read 0%
+while a $0.91 balance was nearly exhausted.
+
+`zipf jobs show <id>` gives the full record for one job: subject, depth,
+estimate against actual with drift, every timestamp, and the stored response it
+produced.
 
 ---
 
@@ -170,6 +222,28 @@ Two consequences shape the design: paid tiers batch aggressively, and `vol` read
 the `keyword` projection first so it buys only the terms that actually went
 stale. Free tiers do the opposite — one item per call, for independent TTLs.
 
+Freshness for volume joins to `raw_response`, because `keyword.updated_at` is
+also set by free discovery. Without that join a keyword autocomplete merely
+*suggested* would look freshly *measured*, and its volume would never be bought.
+
+### Clustering
+
+A real 100-row gap pull returned 50 distinct queries and 50 restatements of them
+— fifteen rows reading `button in html with css`, `html css button`, `css html
+buttons`, all at 22,200 volume, all ranking the same URL.
+
+`vol` and `gap` collapse those into one row, keyed on the **token set**: two
+keywords built from the same words, ignoring order, filler words, and plurals,
+are the same query. Genuinely narrower queries stay separate — `svg file` and
+`svg file type` do not merge. `--flat` shows every phrasing.
+
+Volume is the **maximum** across variants, never the sum. Adding fifteen
+restatements of a 22,200 keyword would report demand that does not exist.
+
+Clustering is display-only; the purchase is deliberately not deduplicated. A
+redundant row costs $0.00012 against a $0.012 base, so collapsing the batch would
+save fractions of a cent and discard data you asked for.
+
 ### Invariants
 
 Enforced by tests in `tests/invariants/`, and by the database where possible.
@@ -196,6 +270,8 @@ uv run mypy
 uv run pytest
 ```
 
+168 tests, ruff and mypy strict clean.
+
 **A default `pytest` run makes zero network calls and costs $0.** An autouse
 fixture fails any request that a test has not explicitly mocked. Tests marked
 `live` are skipped unless `ZIPF_LIVE=1`.
@@ -203,10 +279,38 @@ fixture fails any request that a test has not explicitly mocked. Tests marked
 Everything runs against a scratch database via `ZIPF_HOME`, so tests never touch
 your real one.
 
+### Error messages
+
+Errors carry two parts: the problem, and what to do about it. The CLI prints them
+on separate lines.
+
+```console
+$ zipf gap example.com
+error own_domain is not configured.
+      Set own_domain in ~/.config/zipf/config.toml, or pass --mine on this command.
+```
+
+Messages never name an invariant or a design decision — a reader holding a shell
+prompt cannot act on "R2". A test fails the suite if any error leaks an
+`R`- or `D`-numbered tag, and the append-only triggers say what to run instead:
+
+```console
+$ sqlite3 ~/.local/share/zipf/zipf.db "DELETE FROM raw_response"
+Stored responses cannot be deleted. Nobody will sell you this data again, so it
+is kept permanently. Projection tables are safe to delete; rebuild restores them.
+```
+
 ---
 
 ## Not built yet
 
 The terminal UI, SERP and AI Overview capture, the LLM visibility panel, and the
-MCP server. Traffic estimates and a proprietary difficulty score are permanent
-non-goals — see `dev/prd.md` for why.
+MCP server.
+
+There is also no home for data you author — no publishing status, no notes. Every
+table today holds either paid bytes or something derived from them, and `rebuild`
+would erase anything hand-written. That is the missing half of PRD problem #4,
+*"did the thing I published actually work"*.
+
+Traffic estimates and a proprietary difficulty score are permanent non-goals —
+see `dev/prd.md` for why.
