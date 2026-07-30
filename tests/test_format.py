@@ -10,7 +10,7 @@ import sqlite3
 
 import pytest
 
-from zipf.cli.format import ABSENT, money, number, plural
+from zipf.format import ABSENT, money, number, plural
 from zipf.projections.rebuild import count_rows, rebuild
 
 

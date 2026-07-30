@@ -89,6 +89,21 @@ class ConfigMissingError(ZipfError):
         )
 
 
+class DatabaseMissingError(ZipfError):
+    """There is no database to read.
+
+    Raised only by the read-only path. The read-write path creates the file, so
+    the only way to reach this is to read before ever running ``zipf init``.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        super().__init__(
+            f"There is no zipf database at {path}.",
+            fix="Run `zipf init` to create it.",
+        )
+
+
 class VendorError(ZipfError):
     """A vendor returned an error, an unparseable body, or timed out."""
 

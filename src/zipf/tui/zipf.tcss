@@ -1,0 +1,12 @@
+/* Two visual registers (PRD §9.1).
+ *
+ * Free actions use default theme styling. One colour is reserved exclusively
+ * for spend, so anything that can cost money is recognisable before it is read.
+ * Nothing that does not spend may use $spend — the register only carries
+ * meaning while it stays reserved.
+ */
+$spend: #d78700;
+
+#cache-summary {
+    padding: 1 2;
+}

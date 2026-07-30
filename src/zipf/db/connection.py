@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
+from zipf.errors import DatabaseMissingError
+
 # WAL lets the TUI read while the job runner writes. NORMAL synchronous is safe
 # under WAL for this workload; the durability gap is a crash mid-commit losing
 # the last transaction, which a re-fetch recovers.
@@ -51,7 +53,7 @@ def open_ro(path: Path) -> sqlite3.Connection:
     what SQL they are handed.
     """
     if not path.exists():
-        raise FileNotFoundError(f"no zipf database at {path}; run `zipf init`")
+        raise DatabaseMissingError(str(path))
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, isolation_level=None)
     _configure(conn, read_only=True)
     return conn

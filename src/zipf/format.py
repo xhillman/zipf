@@ -1,7 +1,9 @@
-"""Text formatting for command output.
+"""Text formatting for user-visible output.
 
-Separate from ``main`` so it can be tested. These produce user-visible strings,
-and a pluralisation bug ships as "50 distinct querys".
+Sits above both shells rather than inside either: the CLI and the TUI are peers
+(spec D2), so a formatter they share cannot live in one and be imported by the
+other. These produce user-visible strings, and a pluralisation bug ships as
+"50 distinct querys".
 """
 
 from __future__ import annotations

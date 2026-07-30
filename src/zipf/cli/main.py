@@ -18,13 +18,13 @@ from rich.panel import Panel
 from rich.table import Table
 
 from zipf.budget import Budget
-from zipf.cli.format import money, number, plural
 from zipf.cli.paid import confirm_spend
 from zipf.clock import age_of, age_of_delta, elapsed_between
 from zipf.config import DEFAULT_CONFIG_TOML, Paths, load_settings
 from zipf.db.connection import connect
 from zipf.db.migrate import migrate
 from zipf.errors import ConfigMissingError, ZipfError
+from zipf.format import money, number, plural
 from zipf.jobs import queue as job_queue
 from zipf.jobs.describe import job_depth, job_kind, job_subject
 from zipf.jobs.runner import JobRunner
@@ -40,8 +40,8 @@ from zipf.sources import gsc as gsc_source
 
 app = typer.Typer(
     name="zipf",
-    help="Keyword research over a local SQLite cache.",
-    no_args_is_help=True,
+    help="Keyword research over a local SQLite cache. Run bare to browse the cache.",
+    invoke_without_command=True,
     add_completion=False,
 )
 db_app = typer.Typer(name="db", help="Database maintenance.", no_args_is_help=True)
@@ -206,6 +206,22 @@ def _print_gap_flat(rows: list[dict[str, Any]]) -> None:
         volume = f"{row['volume']:,}" if row["volume"] is not None else "[dim]—[/]"
         table.add_row(row["keyword"], volume, str(row["position"]))
     console.print(table)
+
+
+@app.callback()
+def default(ctx: typer.Context) -> None:
+    """Open the cache browser when no subcommand is given.
+
+    Browsing is read-only and free, so the bare command is the safe default.
+    Anything that spends money is a subcommand or a typed `:` command.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    from zipf.tui.app import ZipfApp
+
+    with connect(Paths.resolve().db_file, read_only=True) as conn:
+        ZipfApp(conn).run()
 
 
 @app.command()
