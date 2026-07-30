@@ -25,6 +25,7 @@ from typing import Final, Literal, Protocol
 from zipf.budget import Budget
 from zipf.errors import InvalidRequestError
 from zipf.format import plural
+from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
 from zipf.services import budget as budget_service
 from zipf.services import gap as gap_service
@@ -238,6 +239,29 @@ async def _gap(context: Context, args: list[str]) -> Outcome:
     )
 
 
+async def _cancel(context: Context, args: list[str]) -> Outcome:
+    """Pull a queued job before the runner reaches it.
+
+    The app drains continuously, so this is the only way to change your mind
+    about something already queued without closing the window. A job that has
+    started cannot be cancelled — the money is already committed.
+    """
+    _require(args, what="cancel", example=":cancel 7")
+    if not args[0].isdigit():
+        raise InvalidRequestError(
+            f"{args[0]!r} is not a job number.",
+            fix="Take the number from the jobs pane, as in `:cancel 7`.",
+        )
+
+    job_id = int(args[0])
+    if queue.cancel(context.write, job_id):
+        return Outcome(message=f"cancelled job {job_id} · nothing spent", changed=True)
+    return Outcome(
+        message=f"job {job_id} is not queued — it has already started or finished",
+        severity="warning",
+    )
+
+
 def _positive_int(value: str | None, flag: str, fallback: int) -> int:
     if value is None:
         return fallback
@@ -265,6 +289,7 @@ REGISTRY: Final[dict[str, Command]] = {
         Command("help", "list the commands", _help),
         Command("quit", "close zipf", _quit),
         Command("budget", "refresh spend and vendor balance", _budget),
+        Command("cancel", "drop a queued job before it runs", _cancel),
         Command("suggest", "autocomplete suggestions for a seed", _suggest),
         Command("vol", "search volume for keywords", _vol, spends=True),
         Command("gap", "keywords a competitor ranks for and you do not", _gap, spends=True),

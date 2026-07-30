@@ -20,6 +20,7 @@ import respx
 from zipf.budget import Budget
 from zipf.clock import now_iso
 from zipf.errors import InvalidRequestError
+from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
 from zipf.projections.rebuild import count_rows
 from zipf.sources.autocomplete import ENDPOINT
@@ -231,3 +232,39 @@ async def test_suggest_a_second_time_makes_no_request(
     await commands.execute(context, ":suggest crm")
 
     assert route.call_count == 1
+
+
+async def test_cancel_drops_a_queued_job(context: FakeContext) -> None:
+    """The stop button for a command typed by mistake.
+
+    Tested here rather than through the app because the app hosts a runner that
+    would race the cancel — which is itself the reason this command exists.
+    """
+    job_id = queue.enqueue(
+        context.write, "labs.search_volume", {"keywords": ["x"]}, estimated_cost=0.012
+    )
+
+    outcome = await commands.execute(context, f":cancel {job_id}")
+
+    assert "nothing spent" in outcome.message
+    row = context.write.execute("SELECT status FROM job WHERE id = ?", (job_id,)).fetchone()
+    assert row["status"] == "cancelled"
+
+
+async def test_cancelling_a_job_that_already_ran_says_so(context: FakeContext) -> None:
+    """A started job cannot be un-spent, and the message must not imply it can."""
+    job_id = queue.enqueue(
+        context.write, "labs.search_volume", {"keywords": ["x"]}, estimated_cost=0.012
+    )
+    context.write.execute("UPDATE job SET status = 'done' WHERE id = ?", (job_id,))
+
+    outcome = await commands.execute(context, f":cancel {job_id}")
+
+    assert outcome.severity == "warning"
+    assert "already started or finished" in outcome.message
+
+
+async def test_cancel_needs_a_number(context: FakeContext) -> None:
+    with pytest.raises(InvalidRequestError) as caught:
+        await commands.execute(context, ":cancel ahrefs.com")
+    assert ":cancel 7" in str(caught.value.fix)

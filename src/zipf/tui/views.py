@@ -13,7 +13,9 @@ part of itself. Markup is used only for strings this module writes itself.
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Final
@@ -23,6 +25,7 @@ from rich.text import Text
 from zipf import capabilities
 from zipf.clock import from_iso, now
 from zipf.format import ABSENT, meter, plural
+from zipf.jobs.describe import job_subject
 from zipf.services import browse
 from zipf.services import gap as gap_service
 from zipf.services.budget import BudgetStatus
@@ -353,6 +356,54 @@ def status_line(state: BudgetStatus, totals: browse.CacheCounts) -> str:
         f"{meter(state.used_fraction)}  "
         f"[dim]{totals.keywords:,} kw · {plural(totals.domains, 'domain')}[/]{pending}"
     )
+
+
+#: How a job's status reads at a glance. Matches the CLI's palette so the same
+#: word is never a different colour in the two shells.
+_JOB_STYLES: Final[dict[str, str]] = {
+    "done": "green",
+    "failed": "red",
+    "queued": "yellow",
+    "running": "cyan",
+    "cancelled": "dim",
+}
+
+#: A glyph per status, so the pane is scannable down the left edge without
+#: reading. Truncating the words instead produced "queu", which is not a word.
+_JOB_MARKS: Final[dict[str, str]] = {
+    "done": "●",
+    "failed": "✕",
+    "queued": "○",
+    "running": "◐",
+    "cancelled": "◌",
+}
+
+
+def jobs_markup(rows: Sequence[sqlite3.Row]) -> str:
+    """The jobs pane: what is queued, what is running, what it cost.
+
+    Shows the subject rather than the capability — three gap pulls all reading
+    ``labs.domain_intersection`` are indistinguishable, which is the problem the
+    usability pass fixed in ``jobs list`` and would be inherited here.
+    """
+    if not rows:
+        return "[dim]no jobs[/]"
+
+    lines = ["[bold]jobs[/]"]
+    for row in rows:
+        params = json.loads(row["params_json"])
+        status = row["status"]
+        style = _JOB_STYLES.get(status, "white")
+
+        # An estimate and a charge are different facts, so the tilde stays until
+        # the vendor has said what it actually cost.
+        actual, estimated = row["actual_cost"], row["estimated_cost"]
+        cost = actual if actual is not None else estimated
+        amount = f"{'' if actual is not None else '~'}${cost:.4f}" if cost is not None else ""
+
+        lines.append(f"[{style}]{_JOB_MARKS.get(status, '·')}[/] {job_subject(params)[:19]}")
+        lines.append(f"  [dim]{status}[/] [dim]{amount}[/]")
+    return "\n".join(lines)
 
 
 def detail_markup(detail: dict[str, Any] | None, keyword: str) -> str:

@@ -27,17 +27,33 @@ from typing import ClassVar
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
+from textual.message import Message
 from textual.widgets import DataTable, Footer, Input, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from zipf.budget import Budget
 from zipf.errors import ZipfError
+from zipf.jobs import queue as job_queue
+from zipf.jobs.runner import JobRunner
 from zipf.pricing import PriceEstimate
 from zipf.services import browse
 from zipf.services import budget as budget_service
 from zipf.tui import commands, views
 from zipf.tui.confirm import ConfirmModal
 from zipf.tui.views import TableSpec, View
+
+
+class JobActivity(Message):
+    """The runner reported something.
+
+    Posted rather than calling into the widgets directly: the runner is a worker
+    task, and routing its output through the message queue keeps every UI update
+    on the app's own handling path.
+    """
+
+    def __init__(self, note: str) -> None:
+        self.note = note
+        super().__init__()
 
 
 class ZipfApp(App[None]):
@@ -82,7 +98,9 @@ class ZipfApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Static(id="status")
         with Horizontal(id="body"):
-            yield Tree("cache", id="sidebar")
+            with Vertical(id="side"):
+                yield Tree("cache", id="sidebar")
+                yield Static(id="jobs")
             with Vertical(id="main"):
                 yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
                 yield Static(id="detail")
@@ -95,7 +113,27 @@ class ZipfApp(App[None]):
         self.query_one("#command", Input).display = False
         self._build_sidebar()
         self.show_view(View(views.KEYWORDS))
+        self._refresh_jobs()
         await self.refresh_status()
+        self._start_runner()
+
+    def _start_runner(self) -> None:
+        """Host the job runner in the background (spec D1).
+
+        One runner class, two hosts: ``zipf jobs run`` runs it in the foreground,
+        the app runs it here. Work already in the queue was approved when it was
+        queued, so draining it needs no second consent — but it does need to be
+        visible, which is what the jobs pane is for.
+
+        A reader-only app has nothing to drain with and starts no runner.
+        """
+        if self._write_conn is None:
+            return
+        runner = JobRunner(self._write_conn, self._budget, on_event=self._post_job_activity)
+        self.run_worker(runner.run_forever(), name="job-runner", exclusive=False)
+
+    def _post_job_activity(self, note: str) -> None:
+        self.post_message(JobActivity(note))
 
     # ---------------------------------------------------------------- sidebar
 
@@ -198,6 +236,15 @@ class ZipfApp(App[None]):
 
         detail.update(views.detail_markup(browse.keyword_detail(self._conn, key), key))
 
+    def _refresh_jobs(self) -> None:
+        """Redraw the jobs pane from the queue.
+
+        Read on the browsing handle: WAL means a fresh statement sees whatever
+        the runner has committed, without the reader needing write access.
+        """
+        rows = job_queue.recent(self._conn, limit=4)
+        self.query_one("#jobs", Static).update(views.jobs_markup(rows))
+
     async def refresh_status(self) -> None:
         """Redraw the persistent readout.
 
@@ -276,6 +323,26 @@ class ZipfApp(App[None]):
         await self.refresh_status()
 
     # ----------------------------------------------------------------- events
+
+    async def on_job_activity(self, event: JobActivity) -> None:
+        """A job finished, failed, or was recovered: re-read everything it touched.
+
+        The table is rebuilt because a completed pull is new rows, and the status
+        bar because a completed pull is money spent. Both come from the database
+        rather than from the event, so what is on screen is what was stored.
+
+        A job can finish while the app is closing — the runner is cancelled, but
+        a message it already posted still arrives. Redrawing widgets that are
+        being torn down raises, so a shutting-down app takes the news and stops.
+        The job itself is unaffected: it was recorded before the message was sent.
+        """
+        if not self.is_running:
+            return
+        self._refresh_jobs()
+        self._build_sidebar()
+        self._reload_table()
+        await self.refresh_status()
+        self.notify(event.note, severity="information")
 
     def on_tree_node_selected(self, event: Tree.NodeSelected[View]) -> None:
         node: TreeNode[View] = event.node

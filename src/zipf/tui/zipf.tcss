@@ -16,9 +16,20 @@ $spend: #d78700;
     height: 1fr;
 }
 
-#sidebar {
+#side {
     width: 24;
     border-right: solid $panel;
+}
+
+#sidebar {
+    height: 1fr;
+    padding: 0 1;
+}
+
+/* Fixed height so a finished job appearing never resizes the tree above it. */
+#jobs {
+    height: 9;
+    border-top: solid $panel;
     padding: 0 1;
 }
 

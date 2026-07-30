@@ -9,15 +9,20 @@ pane, does the app survive an empty database.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 from textual.widgets import DataTable, Input, Static, Tree
 
 from zipf.budget import Budget
 from zipf.db.connection import open_ro
 from zipf.errors import DatabaseMissingError
+from zipf.jobs import queue as job_queue
+from zipf.sources.autocomplete import ENDPOINT
 from zipf.tui import views
 from zipf.tui.app import ZipfApp
 from zipf.tui.confirm import ConfirmModal
@@ -472,3 +477,88 @@ async def test_below_the_threshold_nothing_is_asked(seeded: sqlite3.Connection) 
         assert not isinstance(app.screen, ConfirmModal)
 
     assert seeded.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 1
+
+
+SUGGEST_BODY = json.dumps(["crm", ["best crm software", "free crm"], [], [], {}]).encode()
+
+
+async def test_the_app_drains_a_queued_job_and_shows_the_result(
+    db: sqlite3.Connection, blocked_network: respx.MockRouter
+) -> None:
+    """Work queued before opening is already approved, so the app runs it.
+
+    The whole loop through the UI: a queued job, a mocked vendor, and a table
+    that has the new rows in it without anyone pressing refresh.
+    """
+    route = blocked_network.get(ENDPOINT).mock(
+        return_value=httpx.Response(200, content=SUGGEST_BODY)
+    )
+    job_queue.enqueue(db, "autocomplete.suggest", {"seed": "crm"}, estimated_cost=0.0)
+
+    app = ZipfApp(db, write_conn=db)
+    async with app.run_test() as pilot:
+        # The runner claims on start, so the job may already be done by the first
+        # yield. Poll for the outcome rather than asserting an empty table first.
+        for _ in range(20):
+            await pilot.pause()
+            if app.query_one("#rows", DataTable).row_count:
+                break
+
+        assert route.called
+        assert app.query_one("#rows", DataTable).row_count == 2
+        assert db.execute("SELECT status FROM job WHERE id = 1").fetchone()["status"] == "done"
+        assert "done" in str(app.query_one("#jobs", Static).render())
+
+
+async def test_the_jobs_pane_names_the_subject_not_the_capability(
+    seeded: sqlite3.Connection,
+) -> None:
+    """Three gap pulls reading `labs.domain_intersection` would be identical."""
+    job_queue.enqueue(
+        seeded,
+        "labs.domain_intersection",
+        {"target1": "ahrefs.com", "target2": "mine.com", "limit": 100, "intersections": False},
+        estimated_cost=0.024,
+    )
+    app = ZipfApp(seeded)  # reader-only: no runner, so the job stays queued
+    async with app.run_test():
+        pane = str(app.query_one("#jobs", Static).render())
+    assert "ahrefs.com" in pane
+    assert "labs.domain_intersection" not in pane
+    assert "$0.0240" in pane
+
+
+async def test_a_reader_only_app_starts_no_runner(
+    seeded: sqlite3.Connection, blocked_network: respx.MockRouter
+) -> None:
+    """Without a write handle there is nothing to drain with, and nothing runs.
+
+    `blocked_network` fails any unmocked request, so a runner that started here
+    would fail this test rather than quietly spending.
+    """
+    job_queue.enqueue(seeded, "autocomplete.suggest", {"seed": "crm"}, estimated_cost=0.0)
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        for _ in range(5):
+            await pilot.pause()
+        assert seeded.execute("SELECT status FROM job WHERE id = 1").fetchone()["status"] == (
+            "queued"
+        )
+
+
+async def test_an_empty_queue_says_so(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test():
+        assert "no jobs" in str(app.query_one("#jobs", Static).render())
+
+
+async def test_cancelling_a_finished_job_reports_rather_than_lying(
+    seeded: sqlite3.Connection,
+) -> None:
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        app.query_one("#command", Input).value = "cancel 99"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.is_running
