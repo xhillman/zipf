@@ -13,7 +13,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from textual.widgets import DataTable, Static, Tree
+from textual.widgets import DataTable, Input, Static, Tree
 
 from zipf.db.connection import open_ro
 from zipf.errors import DatabaseMissingError
@@ -174,3 +174,152 @@ def test_missing_database_names_its_fix(tmp_path: Path) -> None:
     with pytest.raises(DatabaseMissingError) as caught:
         open_ro(tmp_path / "absent.db")
     assert "zipf init" in str(caught.value.fix)
+
+
+async def test_slash_opens_the_filter_and_typing_narrows_the_table(
+    seeded: sqlite3.Connection,
+) -> None:
+    """Filtering is local SQL, so it happens per keystroke with no spinner."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        table = app.query_one("#rows", DataTable)
+        assert table.row_count == 2
+
+        await pilot.press("slash")
+        await pilot.pause()
+        bar = app.query_one("#filter", Input)
+        assert bar.display and bar.has_focus
+
+        for key in "free":
+            await pilot.press(key)
+        await pilot.pause()
+        assert table.row_count == 1
+        assert 'matching "free"' in app.sub_title
+
+
+async def test_slash_is_typed_into_the_filter_not_re_triggered(
+    seeded: sqlite3.Connection,
+) -> None:
+    """Once the bar has focus, its own key must reach the input as a character."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("slash")
+        await pilot.press("slash")
+        await pilot.pause()
+        assert app.query_one("#filter", Input).value == "/"
+
+
+async def test_escape_clears_the_filter_and_restores_every_row(
+    seeded: sqlite3.Connection,
+) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("slash")
+        for key in "free":
+            await pilot.press(key)
+        await pilot.pause()
+        assert app.query_one("#rows", DataTable).row_count == 1
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.query_one("#rows", DataTable).row_count == 2
+        assert not app.query_one("#filter", Input).display
+        assert "matching" not in app.sub_title
+
+
+async def test_enter_keeps_the_filter_but_returns_focus(seeded: sqlite3.Connection) -> None:
+    """Submitting is not cancelling: the narrowed table stays."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("slash")
+        for key in "free":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.query_one("#rows", DataTable).row_count == 1
+        assert app.query_one("#rows", DataTable).has_focus
+        assert 'matching "free"' in app.sub_title
+
+
+async def test_changing_view_drops_the_filter(seeded: sqlite3.Connection) -> None:
+    """A filter carried into a new table would empty it for an off-screen reason."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("slash")
+        for key in "free":
+            await pilot.press(key)
+        await pilot.pause()
+
+        app.show_view(views.View(views.DOMAINS))
+        await pilot.pause()
+        assert app.query_one("#rows", DataTable).row_count == 1  # the one domain
+        assert "matching" not in app.sub_title
+
+
+async def test_s_cycles_the_sort_and_says_which(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("s")
+        await pilot.pause()
+        assert "by volume" in app.sub_title
+        await pilot.press("s")
+        await pilot.pause()
+        assert "by keyword" in app.sub_title
+        first_row = app.query_one("#rows", DataTable).get_row_at(0)
+        assert str(first_row[0]) == "best crm software"  # alphabetical, not by volume
+
+
+async def test_sorting_a_view_with_no_order_is_reported(seeded: sqlite3.Connection) -> None:
+    """The keypress must not vanish silently."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        app.show_view(views.View(views.VISIBILITY))
+        await pilot.press("s")
+        await pilot.pause()
+        assert app.sub_title == "nothing sampled yet"  # unchanged, no sort applied
+
+
+async def test_enter_drills_from_domains_into_one_domain(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        app.show_view(views.View(views.DOMAINS))
+        app.query_one("#rows", DataTable).focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.sub_title == "ahrefs.com · 2 keywords"
+
+
+async def test_reload_picks_up_a_row_written_since_opening(zipf_home: Path) -> None:
+    """`r` re-reads the database, so finished work appears without a restart."""
+    writer_path = zipf_home / "zipf.db"
+    conn = open_ro(writer_path)
+    try:
+        app = ZipfApp(conn)
+        async with app.run_test() as pilot:
+            assert app.query_one("#rows", DataTable).row_count == 0
+
+            from zipf.db.connection import connect
+
+            with connect(writer_path) as writer:
+                writer.execute(
+                    "INSERT INTO keyword (keyword, volume, updated_at) VALUES (?, ?, ?)",
+                    ("added later", 10, "2026-07-20T00:00:00Z"),
+                )
+
+            await pilot.press("r")
+            await pilot.pause()
+            assert app.query_one("#rows", DataTable).row_count == 1
+            assert "cache  1" in str(app.query_one("#sidebar", Tree).root.label)
+    finally:
+        conn.close()
+
+
+async def test_reload_makes_no_network_call(seeded: sqlite3.Connection) -> None:
+    """`r` cannot refresh the vendor balance: that write needs the runner's handle."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("r")
+        await pilot.pause()
+        assert "left" in str(app.query_one("#status", Static).render())

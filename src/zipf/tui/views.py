@@ -42,6 +42,57 @@ VISIBILITY: Final = "visibility"
 KEYWORD_KEY: Final = "keyword"
 OPAQUE_KEY: Final = "opaque"
 
+#: Which sort keys each view offers, in the order pressing sort cycles through
+#: them. Only views backed by a sortable query appear: a gap pull is already
+#: ordered by opportunity, and re-sorting 50 clustered rows answers no question.
+SORT_CYCLES: Final[dict[str, tuple[str, ...]]] = {
+    KEYWORDS: tuple(browse.KEYWORD_SORTS),
+    DOMAINS: tuple(browse.DOMAIN_SORTS),
+    GSC: tuple(browse.GSC_SORTS),
+}
+
+#: Column header to sort key, for sorting by clicking a header. Absent headers
+#: are not sortable — ``aio`` has one of three values and ``url`` is incidental.
+SORT_BY_COLUMN: Final[dict[str, dict[str, str]]] = {
+    KEYWORDS: {"keyword": "keyword", "vol": "volume", "age": "updated", "pos": "position"},
+    DOMAINS: {"domain": "domain", "keywords": "keywords", "age": "observed"},
+    GSC: {"query": "query", "clicks": "clicks", "impr": "impressions", "pos": "position"},
+}
+
+
+def next_sort(kind: str, current: str | None) -> str | None:
+    """The sort key after ``current`` for this view, wrapping around.
+
+    Returns ``None`` for a view with nothing worth sorting, so the caller can say
+    so rather than silently doing nothing.
+    """
+    cycle = SORT_CYCLES.get(kind)
+    if not cycle:
+        return None
+    if current is None or current not in cycle:
+        return cycle[0]
+    return cycle[(cycle.index(current) + 1) % len(cycle)]
+
+
+def sort_for_column(kind: str, column: str) -> str | None:
+    """The sort key a column header maps to, or ``None`` if it is not sortable."""
+    return SORT_BY_COLUMN.get(kind, {}).get(column)
+
+
+def drill_target(view: View, key: str) -> View | None:
+    """Where pressing enter on a row goes, or ``None`` when there is nowhere.
+
+    Only rows that name a container have somewhere to go. A keyword row will
+    open its SERP once that milestone lands; until then the honest answer is
+    nothing, which the caller reports rather than silently ignoring.
+    """
+    if view.kind == DOMAINS:
+        return View(DOMAIN, key)
+    if view.kind == GAPS:
+        return View(GAP, key)
+    return None
+
+
 #: How long a stored volume stays true. Used to decide whether an age is worth
 #: showing at all: below the TTL the number is current, and printing "3d" next to
 #: current data is noise the PRD explicitly rules out ("default to silence").
@@ -183,15 +234,27 @@ def _gap_pair_rows(rows: list[dict[str, Any]]) -> TableSpec:
     )
 
 
-def _gap_rows(conn: sqlite3.Connection, pair: str) -> TableSpec:
+def _gap_rows(conn: sqlite3.Connection, pair: str, contains: str | None) -> TableSpec:
     """One gap pull, with restatements of the same query collapsed.
 
     Clustered rather than flat because that is what the CLI shows and what the
     number actually means: a hundred bought rows are often twenty real
     opportunities.
+
+    Filtering happens here rather than in SQL because clustering happens after
+    the query: a term matching a collapsed variant should still show the cluster
+    that contains it. The list is capped at fifty, so the cost is nil.
     """
     competitor, _, mine = pair.partition("|")
     clusters = gap_service.read(conn, competitor, mine)
+    if contains:
+        term = contains.casefold()
+        clusters = [
+            cluster
+            for cluster in clusters
+            if term in cluster.keyword.casefold()
+            or any(term in variant.casefold() for variant in cluster.variants)
+        ]
     cells: list[tuple[Text | str, ...]] = [
         (
             Text(cluster.keyword),
@@ -248,15 +311,15 @@ def table_for(
             browse.keywords(conn, contains=contains, sort=sort, own_domain=own_domain)
         )
     if view.kind == DOMAINS:
-        return _domain_rows(browse.domains(conn, sort=sort))
+        return _domain_rows(browse.domains(conn, contains=contains, sort=sort))
     if view.kind == DOMAIN and view.arg:
         return _domain_keyword_rows(
             browse.domain_keywords(conn, view.arg, contains=contains), view.arg
         )
     if view.kind == GAPS:
-        return _gap_pair_rows(browse.gap_pairs(conn))
+        return _gap_pair_rows(browse.gap_pairs(conn, contains=contains))
     if view.kind == GAP and view.arg:
-        return _gap_rows(conn, view.arg)
+        return _gap_rows(conn, view.arg, contains)
     if view.kind == GSC:
         return _gsc_rows(browse.gsc_queries(conn, contains=contains, sort=sort))
     return _visibility_placeholder()

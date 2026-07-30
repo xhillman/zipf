@@ -156,3 +156,69 @@ def test_status_line_omits_jobs_when_there_are_none() -> None:
         jobs_pending=0,
     )
     assert "job" not in views.status_line(state, totals)
+
+
+def test_sort_cycles_wrap_and_start_at_the_default() -> None:
+    cycle = views.SORT_CYCLES[views.KEYWORDS]
+    current = views.next_sort(views.KEYWORDS, None)
+    assert current == "volume"  # volume first: the reason you bought the data
+
+    seen: list[str] = []
+    for _ in range(len(cycle)):
+        assert current is not None
+        seen.append(current)
+        current = views.next_sort(views.KEYWORDS, current)
+
+    assert seen == list(cycle)  # every key reachable, none repeated
+    assert current == cycle[0]  # and it wraps back to the start
+
+
+def test_views_without_a_sortable_query_report_none() -> None:
+    """A gap pull is already ordered by opportunity; re-sorting answers nothing."""
+    assert views.next_sort(views.GAP, None) is None
+    assert views.next_sort(views.VISIBILITY, None) is None
+
+
+def test_every_sort_key_is_one_browse_accepts(seeded: sqlite3.Connection) -> None:
+    """The cycle and the allowlist cannot drift apart without this failing."""
+    for kind, cycle in views.SORT_CYCLES.items():
+        for key in cycle:
+            views.table_for(seeded, View(kind), sort=key)
+
+
+def test_column_headers_map_to_sort_keys() -> None:
+    assert views.sort_for_column(views.KEYWORDS, "vol") == "volume"
+    assert views.sort_for_column(views.KEYWORDS, "aio") is None  # three values, no order
+    assert views.sort_for_column(views.GAP, "vol") is None
+
+
+def test_drill_goes_from_container_to_contents() -> None:
+    assert views.drill_target(View(views.DOMAINS), "ahrefs.com") == View(views.DOMAIN, "ahrefs.com")
+    assert views.drill_target(View(views.GAPS), "a.com|b.com") == View(views.GAP, "a.com|b.com")
+
+
+def test_a_keyword_row_has_nowhere_to_drill_yet() -> None:
+    """Honest until the SERP milestone: a keyword has no deeper screen."""
+    assert views.drill_target(View(views.KEYWORDS), "free crm") is None
+
+
+def test_filtering_a_gap_matches_collapsed_variants(db: sqlite3.Connection) -> None:
+    """A term matching a restatement must still surface the cluster holding it."""
+    db.execute(
+        "INSERT INTO raw_response (capability, params_hash, params_json, body, cost_usd, "
+        "fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("labs.domain_intersection", "h", "{}", b"{}", 0.0, to_iso(now())),
+    )
+    for keyword, position in (("best crm software", 3), ("crm software best", 4), ("free crm", 9)):
+        db.execute(
+            "INSERT INTO domain_keyword (domain, keyword, position, url, observed_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("them.com", keyword, position, "https://them.com/x", to_iso(now())),
+        )
+
+    unfiltered = views.table_for(db, View(views.GAP, "them.com|mine.com"))
+    assert len(unfiltered.rows) == 2  # the two phrasings collapsed into one
+
+    filtered = views.table_for(db, View(views.GAP, "them.com|mine.com"), contains="software best")
+    assert len(filtered.rows) == 1
+    assert str(filtered.rows[0][0]) == "best crm software"  # the representative, not the variant

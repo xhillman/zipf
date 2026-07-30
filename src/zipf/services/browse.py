@@ -194,11 +194,24 @@ def keywords(
 def domains(
     conn: sqlite3.Connection,
     *,
+    contains: str | None = None,
     sort: str | None = None,
     limit: int = DEFAULT_LIMIT,
 ) -> list[dict[str, Any]]:
-    """Every domain the cache holds ranks for, with how much is known about each."""
+    """Every domain the cache holds ranks for, with how much is known about each.
+
+    ``contains`` matches the domain name, not its keywords. Filtering a list of
+    domains by their contents would return domains whose names do not match the
+    term, which reads as a broken filter.
+    """
     order = _order_by(DOMAIN_SORTS, sort)
+    params: list[Any] = []
+    where = ""
+    if contains:
+        where = "WHERE domain LIKE ? ESCAPE '\\'"
+        params.append(_contains(contains))
+    params.append(_bounded(limit))
+
     rows = conn.execute(
         f"""
         SELECT domain,
@@ -206,11 +219,12 @@ def domains(
                MIN(position)           AS best_position,
                MAX(observed_at)        AS last_observed
         FROM domain_keyword
+        {where}
         GROUP BY domain
         ORDER BY {order}
         LIMIT ?
         """,
-        (_bounded(limit),),
+        tuple(params),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -244,15 +258,30 @@ def domain_keywords(
     return [dict(row) for row in rows]
 
 
-def gap_pairs(conn: sqlite3.Connection, limit: int = DEFAULT_LIMIT) -> list[dict[str, Any]]:
+def gap_pairs(
+    conn: sqlite3.Connection,
+    *,
+    contains: str | None = None,
+    limit: int = DEFAULT_LIMIT,
+) -> list[dict[str, Any]]:
     """Which gap pulls exist, newest first.
 
     Read from ``raw_response`` params rather than from a projection because a gap
     is a question that was asked, not a row that was stored. The answer lives in
     ``domain_keyword``; only the pairing records who was compared with whom.
+
+    ``contains`` matches either side of the comparison, so filtering for your own
+    domain finds every pull you are part of.
     """
+    params: list[Any] = [labs.DOMAIN_INTERSECTION]
+    having = ""
+    if contains:
+        having = "HAVING competitor LIKE ? ESCAPE '\\' OR mine LIKE ? ESCAPE '\\'"
+        params += [_contains(contains), _contains(contains)]
+    params.append(_bounded(limit))
+
     rows = conn.execute(
-        """
+        f"""
         SELECT json_extract(params_json, '$.target1') AS competitor,
                json_extract(params_json, '$.target2') AS mine,
                MAX(fetched_at)                        AS last_pulled,
@@ -260,10 +289,11 @@ def gap_pairs(conn: sqlite3.Connection, limit: int = DEFAULT_LIMIT) -> list[dict
         FROM raw_response
         WHERE capability = ?
         GROUP BY competitor, mine
+        {having}
         ORDER BY last_pulled DESC
         LIMIT ?
         """,
-        (labs.DOMAIN_INTERSECTION, _bounded(limit)),
+        tuple(params),
     ).fetchall()
     return [dict(row) for row in rows]
 

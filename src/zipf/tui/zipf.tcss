@@ -38,3 +38,12 @@ $spend: #d78700;
     border-top: solid $panel;
     padding: 0 1;
 }
+
+/* Sits below the detail pane and takes one line, so opening it never reflows
+ * the table out from under the row you were looking at. */
+#filter {
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: $panel;
+}
