@@ -46,6 +46,7 @@ class Job:
     error: str | None
     vendor_task_id: str | None
     raw_id: int | None
+    started_at: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Job:
@@ -60,6 +61,7 @@ class Job:
             error=row["error"],
             vendor_task_id=row["vendor_task_id"],
             raw_id=row["raw_id"],
+            started_at=row["started_at"],
         )
 
 
@@ -98,13 +100,13 @@ def claim(conn: sqlite3.Connection) -> Job | None:
     """
     with transaction(conn):
         row = conn.execute(
-            "UPDATE job SET status = ?, attempts = attempts + 1 "
+            "UPDATE job SET status = ?, attempts = attempts + 1, started_at = ? "
             "WHERE id = ("
             "  SELECT id FROM job "
             "  WHERE status = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
             "  ORDER BY id LIMIT 1"
             ") RETURNING *",
-            (RUNNING, QUEUED, now_iso()),
+            (RUNNING, now_iso(), QUEUED, now_iso()),
         ).fetchone()
 
     return Job.from_row(row) if row is not None else None
@@ -173,8 +175,9 @@ def cancel(conn: sqlite3.Connection, job_id: int) -> bool:
 
 def recent(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT id, capability, status, attempts, estimated_cost, actual_cost, "
-        "error, created_at, finished_at FROM job ORDER BY id DESC LIMIT ?",
+        "SELECT id, capability, params_json, status, attempts, estimated_cost, actual_cost, "
+        "error, vendor_task_id, raw_id, created_at, started_at, finished_at "
+        "FROM job ORDER BY id DESC LIMIT ?",
         (limit,),
     ).fetchall()
 
@@ -184,3 +187,9 @@ def pending_count(conn: sqlite3.Connection) -> int:
         "SELECT COUNT(*) AS n FROM job WHERE status IN (?, ?)", (QUEUED, RUNNING)
     ).fetchone()
     return int(row["n"])
+
+
+def get(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    """One job, every column, for the detail view."""
+    row: sqlite3.Row | None = conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
+    return row

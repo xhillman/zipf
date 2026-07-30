@@ -7,21 +7,25 @@ shells over ``zipf.services``; neither owns logic.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from collections.abc import Callable, Coroutine
 from typing import Annotated, Any
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from zipf.budget import Budget
 from zipf.cli.paid import confirm_spend
+from zipf.clock import age_of, elapsed_between
 from zipf.config import DEFAULT_CONFIG_TOML, Paths, load_settings
 from zipf.db.connection import connect
 from zipf.db.migrate import migrate
 from zipf.errors import CredentialMissingError, ZipfError
 from zipf.jobs import queue as job_queue
+from zipf.jobs.describe import job_depth, job_kind, job_subject
 from zipf.jobs.runner import JobRunner
 from zipf.projections.rebuild import rebuild as rebuild_projections
 from zipf.services import budget as budget_service
@@ -46,6 +50,17 @@ app.add_typer(gsc_app)
 app.add_typer(jobs_app)
 
 console = Console()
+
+_JOB_STYLES = {"done": "green", "failed": "red", "queued": "yellow", "running": "cyan"}
+
+
+def _cost_cell(row: sqlite3.Row) -> str:
+    """What a job cost, falling back to the estimate while it is still pending."""
+    if row["actual_cost"] is not None:
+        return f"${row['actual_cost']:.5f}"
+    if row["estimated_cost"] is not None:
+        return f"[dim]~${row['estimated_cost']:.5f}[/]"
+    return "[dim]—[/]"
 
 
 def _budget() -> Budget:
@@ -470,24 +485,80 @@ def jobs_list(limit: int = typer.Option(20, "--limit")) -> None:
         return
 
     table = Table(title=f"{len(rows)} recent job(s)")
-    for column in ("id", "capability", "status", "try", "est", "actual"):
-        table.add_column(column)
-    styles = {"done": "green", "failed": "red", "queued": "yellow", "running": "cyan"}
+    table.add_column("id", justify="right", style="dim")
+    # One line per job: a queue is scanned vertically, so wrapping costs more
+    # than the truncated tail is worth.
+    # One line per job: a queue is scanned vertically, so wrapping costs more
+    # than the truncated tail is worth. Only "what" may be shortened; a
+    # truncated status or cost would be actively misleading.
+    table.add_column("what", max_width=28, no_wrap=True, overflow="ellipsis")
+    table.add_column("kind", style="dim", no_wrap=True)
+    table.add_column("status", no_wrap=True)
+    table.add_column("when", justify="right", style="dim", no_wrap=True)
+    table.add_column("cost", justify="right", no_wrap=True)
+
     for row in rows:
-        actual = f"${row['actual_cost']:.5f}" if row["actual_cost"] is not None else "—"
-        estimate = f"${row['estimated_cost']:.5f}" if row["estimated_cost"] is not None else "—"
+        params = json.loads(row["params_json"])
+        # Attempts only carry information once a retry has happened.
+        retries = f" [yellow]x{row['attempts']}[/]" if row["attempts"] > 1 else ""
         table.add_row(
             str(row["id"]),
-            row["capability"],
-            f"[{styles.get(row['status'], 'white')}]{row['status']}[/]",
-            str(row["attempts"]),
-            estimate,
-            actual,
+            job_subject(params),
+            job_kind(row["capability"]),
+            f"[{_JOB_STYLES.get(row['status'], 'white')}]{row['status']}[/]{retries}",
+            age_of(row["created_at"]),
+            _cost_cell(row),
         )
     console.print(table)
-    for row in rows:
-        if row["error"]:
-            console.print(f"[red]job {row['id']}[/] {row['error']}")
+
+    failures = [row for row in rows if row["error"]]
+    for row in failures:
+        console.print(f"[red]job {row['id']}[/] {row['error']}")
+    if failures:
+        console.print(f"[dim]`zipf jobs show {failures[0]['id']}` for the full record[/]")
+
+
+@jobs_app.command("show")
+def jobs_show(job_id: int = typer.Argument(..., help="Job to inspect.")) -> None:
+    """Everything recorded about one job."""
+    with connect(Paths.resolve().db_file, read_only=True) as conn:
+        row = job_queue.get(conn, job_id)
+
+    if row is None:
+        console.print(f"[yellow]no job {job_id}[/] try `zipf jobs list`")
+        return
+
+    params = json.loads(row["params_json"])
+    estimated, actual = row["estimated_cost"], row["actual_cost"]
+
+    fields: list[tuple[str, str]] = [
+        ("what", job_subject(params)),
+        ("depth", job_depth(params)),
+        ("capability", row["capability"]),
+        ("status", f"[{_JOB_STYLES.get(row['status'], 'white')}]{row['status']}[/]"),
+        ("attempts", str(row["attempts"])),
+        ("estimated", f"${estimated:.5f}" if estimated is not None else "—"),
+        ("actual", f"${actual:.5f}" if actual is not None else "—"),
+    ]
+    if estimated is not None and actual is not None:
+        fields.append(("drift", f"${actual - estimated:+.5f}"))
+    fields += [
+        ("queued", f"{row['created_at']}  ({age_of(row['created_at'])} ago)"),
+        ("started", row["started_at"] or "—"),
+        ("finished", row["finished_at"] or "—"),
+        ("took", elapsed_between(row["started_at"], row["finished_at"])),
+        ("stored as", f"raw_response {row['raw_id']}" if row["raw_id"] else "—"),
+    ]
+    if row["vendor_task_id"]:
+        fields.append(("vendor task", row["vendor_task_id"]))
+
+    width = max(len(label) for label, _ in fields)
+    body = "\n".join(f"  [dim]{label:<{width}}[/]  {value}" for label, value in fields)
+    body += f"\n  [dim]{'params':<{width}}[/]  {json.dumps(params, sort_keys=True)}"
+    if row["error"]:
+        body += f"\n  [dim]{'error':<{width}}[/]  [red]{row['error']}[/]"
+
+    console.print(Panel(body, title=f"job {job_id}", title_align="left", expand=False))
 
 
 @jobs_app.command("cancel")
