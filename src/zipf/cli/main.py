@@ -18,6 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from zipf.budget import Budget
+from zipf.cli.format import money, number, plural
 from zipf.cli.paid import confirm_spend
 from zipf.clock import age_of, elapsed_between
 from zipf.config import DEFAULT_CONFIG_TOML, Paths, load_settings
@@ -27,6 +28,7 @@ from zipf.errors import ConfigMissingError, ZipfError
 from zipf.jobs import queue as job_queue
 from zipf.jobs.describe import job_depth, job_kind, job_subject
 from zipf.jobs.runner import JobRunner
+from zipf.projections.rebuild import count_rows
 from zipf.projections.rebuild import rebuild as rebuild_projections
 from zipf.services import budget as budget_service
 from zipf.services import gap as gap_service
@@ -92,18 +94,34 @@ def _drain(conn: sqlite3.Connection) -> None:
     runner = JobRunner(
         conn, _budget(), on_event=lambda message: console.print(f"[dim]{message}[/]")
     )
+    spent_before = _budget().spent_this_month(conn)
     report = asyncio.run(runner.drain())
-    console.print(
-        f"[green]{report.done} done[/] · {report.failed} failed · {report.claimed} claimed"
+    _effect(
+        f"[green]{report.done} done[/]",
+        f"{report.failed} failed" if report.failed else "",
+        f"{report.requeued} retrying" if report.requeued else "",
+        _spend_since(conn, spent_before),
     )
 
 
-def _number(value: float | None, fmt: str = ",") -> str:
-    return f"{value:{fmt}}" if value is not None else "[dim]—[/]"
+def _effect(*parts: str) -> None:
+    """The closing line of a command: what changed, and what it cost.
+
+    Every command ends with one of these so the outcome is never inferred from
+    the absence of an error. Cost is always stated, including when it is zero —
+    "$0.00" is information, and its absence is not.
+    """
+    console.print("[bold]→[/] " + " · ".join(part for part in parts if part))
 
 
-def _money(value: float | None) -> str:
-    return f"${value:.2f}" if value is not None else "[dim]—[/]"
+def _spend_since(conn: sqlite3.Connection, before: float) -> str:
+    """What this command actually cost, measured rather than predicted.
+
+    Derived from the same ``raw_response`` sum the budget uses, so the figure a
+    command reports and the figure ``zipf budget`` reports cannot disagree.
+    """
+    delta = _budget().spent_this_month(conn) - before
+    return f"${delta:.5f}" if delta > 0 else "$0.00"
 
 
 def _print_volumes(clusters: list[Cluster], total_rows: int) -> None:
@@ -126,9 +144,9 @@ def _print_volumes(clusters: list[Cluster], total_rows: int) -> None:
         best = cluster.representative
         table.add_row(
             cluster.keyword,
-            _number(cluster.volume),
-            _money(best.get("cpc")),
-            _number(best.get("competition"), ".2f"),
+            number(cluster.volume),
+            money(best.get("cpc")),
+            number(best.get("competition"), ".2f"),
             f"+{cluster.variant_count - 1}" if cluster.has_variants else "",
         )
     console.print(table)
@@ -143,9 +161,9 @@ def _print_volumes_flat(rows: list[dict[str, Any]]) -> None:
     for row in rows:
         table.add_row(
             row["keyword"],
-            _number(row["volume"]),
-            _money(row["cpc"]),
-            _number(row["competition"], ".2f"),
+            number(row["volume"]),
+            money(row["cpc"]),
+            number(row["competition"], ".2f"),
         )
     console.print(table)
 
@@ -198,6 +216,7 @@ def init() -> None:
 
     with connect(paths.db_file) as conn:
         applied = migrate(conn)
+        stored = count_rows(conn, "raw_response")
 
     if paths.config_file.exists():
         console.print(f"config   [dim]exists[/]   {paths.config_file}")
@@ -207,6 +226,11 @@ def init() -> None:
 
     state = f"[green]{len(applied)} migration(s)[/]" if applied else "[dim]up to date[/]"
     console.print(f"database {state}  {paths.db_file}")
+    _effect(
+        "ready" if not applied else f"{plural(len(applied), 'migration')} applied",
+        plural(stored, "stored response"),
+        "$0.00",
+    )
 
 
 @app.command()
@@ -221,8 +245,9 @@ def suggest(
 ) -> None:
     """Keyword suggestions from Google Autocomplete. Tier 0, free."""
 
-    async def work(conn: sqlite3.Connection) -> suggest_service.ExpansionResult:
-        return await suggest_service.expand(
+    async def work(conn: sqlite3.Connection) -> tuple[suggest_service.ExpansionResult, int]:
+        known_before = count_rows(conn, "keyword")
+        expansion = await suggest_service.expand(
             conn,
             seed,
             budget=_budget(),
@@ -232,8 +257,9 @@ def suggest(
             country=country,
             force=force,
         )
+        return expansion, count_rows(conn, "keyword") - known_before
 
-    result = _with_db(work)
+    result, newly_stored = _with_db(work)
     terms = result.suggestions
 
     table = Table(title=f"{seed} · {len(terms)} suggestions")
@@ -243,14 +269,17 @@ def suggest(
         table.add_row(str(i), term)
     console.print(table)
 
-    console.print(
-        f"[dim]{len(result.results)} seeds · {result.cache_hits} from cache · "
-        f"{len(terms)} distinct · $0.00[/]"
-    )
     if len(terms) > limit:
         console.print(f"[dim]showing {limit}; all {len(terms)} are stored[/]")
     for bad_seed, reason in result.failures.items():
         console.print(f"[yellow]skipped[/] {bad_seed}: {reason}")
+
+    _effect(
+        f"{plural(len(terms), 'suggestion')} from {plural(len(result.results), 'seed')}",
+        f"{result.cache_hits} cached",
+        f"{plural(newly_stored, 'new keyword')} stored",
+        "$0.00",
+    )
 
 
 @gsc_app.command("auth")
@@ -322,6 +351,13 @@ def gsc_import(
     for error in result.projection_errors:
         console.print(f"[yellow]projection failed[/] {error} — bytes kept, run `zipf db rebuild`")
 
+    _effect(
+        f"{plural(result.rows, 'query row')} imported",
+        f"{plural(result.pages_read, 'page')} read, {result.cache_hits} cached",
+        f"{result.start_date} to {result.end_date}",
+        "$0.00",
+    )
+
 
 @db_app.command("rebuild")
 def db_rebuild(
@@ -331,11 +367,32 @@ def db_rebuild(
     with connect(Paths.resolve().db_file) as conn:
         stats = rebuild_projections(conn, capability)
 
-    console.print(
-        f"[green]rebuilt[/] {', '.join(stats.tables_cleared)} from "
-        f"{stats.rows_replayed:,} stored response(s) → {stats.rows_written:,} row(s)"
+    table = Table(title="projections rebuilt")
+    table.add_column("table")
+    table.add_column("before", justify="right")
+    table.add_column("after", justify="right")
+    table.add_column("change", justify="right")
+    for name in stats.tables_cleared:
+        delta = stats.net_change[name]
+        style = "red" if delta < 0 else ("green" if delta > 0 else "dim")
+        table.add_row(
+            name,
+            f"{stats.before.get(name, 0):,}",
+            f"{stats.after[name]:,}",
+            f"[{style}]{delta:+,}[/]" if delta else "[dim]—[/]",
+        )
+    console.print(table)
+
+    if stats.lost_rows:
+        console.print(
+            f"[red]rows lost[/] {stats.lost_rows} — a rebuild should never shrink a table"
+        )
+
+    _effect(
+        f"{plural(len(stats.tables_cleared), 'table')} replayed",
+        f"from {plural(stats.rows_replayed, 'stored response')}",
+        "$0.00",
     )
-    console.print(f"[dim]capabilities replayed: {', '.join(stats.capabilities)}[/]")
 
 
 @app.command()
@@ -360,6 +417,7 @@ def vol(
     """
 
     def run(conn: sqlite3.Connection) -> None:
+        spent_before = _budget().spent_this_month(conn)
         plan = volume_service.plan(conn, keywords, force=force)
         console.print(
             f"[dim]{len(plan.requested)} keyword(s) · {len(plan.cached)} still fresh · "
@@ -400,6 +458,14 @@ def vol(
         else:
             _print_volumes(volume_service.read(conn, plan.requested), len(rows))
 
+        measured = sum(1 for row in rows if row["volume"] is not None)
+        _effect(
+            f"{plural(len(plan.requested), 'keyword')} asked for",
+            f"{measured} measured",
+            f"{len(plan.cached)} already fresh",
+            _spend_since(conn, spent_before),
+        )
+
     _with_db_sync(run)
 
 
@@ -433,6 +499,7 @@ def gap(
         )
 
     def run(conn: sqlite3.Connection) -> None:
+        spent_before = _budget().spent_this_month(conn)
         plan = gap_service.plan(conn, competitor, own, limit=limit, force=force)
 
         if plan.is_fresh:
@@ -464,10 +531,17 @@ def gap(
             console.print("[yellow]cancelled[/] nothing queued, nothing spent")
 
         rows = gap_service.read_rows(conn, plan.competitor, plan.mine)
+        clusters = gap_service.read(conn, plan.competitor, plan.mine)
         if flat:
             _print_gap_flat(rows)
         else:
-            _print_gap(gap_service.read(conn, plan.competitor, plan.mine), len(rows))
+            _print_gap(clusters, len(rows))
+
+        _effect(
+            f"{plural(len(clusters), 'distinct query')} from {plural(len(rows), 'row')}",
+            f"{plan.competitor} not matched by {plan.mine}",
+            _spend_since(conn, spent_before),
+        )
 
     _with_db_sync(run)
 
@@ -585,6 +659,44 @@ def jobs_cancel(
 def _meter(fraction: float, width: int = 10) -> str:
     filled = min(width, max(0, int(fraction * width)))
     return "▓" * filled + "░" * (width - filled)
+
+
+#: Every table worth counting. Listed rather than derived: `observation` has no
+#: projector until the SERP and LLM milestones, and a stats view that silently
+#: omitted it would be misleading.
+_TABLES = ("raw_response", "keyword", "domain_keyword", "gsc_query", "observation", "job")
+
+
+@db_app.command("stats")
+def db_stats() -> None:
+    """What the database holds. Free, and needs no sqlite3."""
+    paths = Paths.resolve()
+    with connect(paths.db_file, read_only=True) as conn:
+        counts = {name: count_rows(conn, name) for name in _TABLES}
+        summary = conn.execute(
+            "SELECT COUNT(*) AS responses, COUNT(DISTINCT capability) AS sources, "
+            "COALESCE(SUM(cost_usd), 0.0) AS paid, MIN(fetched_at) AS oldest "
+            "FROM raw_response"
+        ).fetchone()
+
+    size_mb = paths.db_file.stat().st_size / 1_048_576
+    console.print(f"database  {paths.db_file}  [dim]{size_mb:.2f} MB[/]")
+    console.print(
+        f"stored    {plural(summary['responses'], 'response')} "
+        f"from {plural(summary['sources'], 'source')} · "
+        f"[bold]${summary['paid']:.5f}[/] paid to date"
+    )
+    if summary["oldest"]:
+        console.print(f"oldest    {summary['oldest']}  [dim]({age_of(summary['oldest'])} ago)[/]")
+
+    table = Table(show_header=True)
+    table.add_column("table")
+    table.add_column("rows", justify="right")
+    for name, count in counts.items():
+        table.add_row(name, f"{count:,}" if count else "[dim]0[/]")
+    console.print(table)
+
+    _effect(f"{plural(sum(counts.values()), 'row')} across {len(_TABLES)} tables", "$0.00")
 
 
 @app.command()

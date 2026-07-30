@@ -10,7 +10,7 @@ Rebuild is the fix for a wrong number. There is never an ``UPDATE`` (R3).
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from zipf.db.connection import transaction
 from zipf.errors import InvalidRequestError
@@ -44,6 +44,30 @@ class RebuildStats:
     tables_cleared: tuple[str, ...]
     rows_replayed: int
     rows_written: int
+    #: Row counts per table before and after, so a caller can show the effect
+    #: rather than asserting one. A rebuild that silently loses rows is the
+    #: failure worth seeing, and it is invisible in a total.
+    before: dict[str, int] = field(default_factory=dict)
+    after: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def net_change(self) -> dict[str, int]:
+        return {table: self.after[table] - self.before.get(table, 0) for table in self.after}
+
+    @property
+    def lost_rows(self) -> dict[str, int]:
+        """Tables that came back smaller. Should always be empty."""
+        return {table: delta for table, delta in self.net_change.items() if delta < 0}
+
+
+def count_rows(conn: sqlite3.Connection, table: str) -> int:
+    """Row count for one projection table.
+
+    The table name is interpolated because it comes from the projector registry,
+    never from input, and SQLite cannot parameterise an identifier.
+    """
+    row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+    return int(row["n"])
 
 
 def project(conn: sqlite3.Connection, raw_id: int) -> int:
@@ -113,6 +137,7 @@ def rebuild(conn: sqlite3.Connection, capability: str | None = None) -> RebuildS
 
     replayed = 0
     written = 0
+    before = {table: count_rows(conn, table) for table in tables}
 
     with transaction(conn):
         for table in tables:
@@ -135,4 +160,6 @@ def rebuild(conn: sqlite3.Connection, capability: str | None = None) -> RebuildS
         tables_cleared=tables,
         rows_replayed=replayed,
         rows_written=written,
+        before=before,
+        after={table: count_rows(conn, table) for table in tables},
     )
