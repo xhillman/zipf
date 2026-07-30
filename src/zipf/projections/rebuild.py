@@ -13,6 +13,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from zipf.db.connection import transaction
+from zipf.errors import InvalidRequestError
 from zipf.projections import domain_keyword, gsc_query, keyword
 from zipf.projections.base import Projector
 
@@ -100,7 +101,10 @@ def rebuild(conn: sqlite3.Connection, capability: str | None = None) -> RebuildS
         target = PROJECTORS.get(capability)
         if target is None:
             known = ", ".join(sorted(PROJECTORS)) or "none registered"
-            raise ValueError(f"no projector for {capability!r}; known: {known}")
+            raise InvalidRequestError(
+                f"Nothing is projected from {capability!r}.",
+                fix=f"Rebuildable sources: {known}.",
+            )
         projectors = _closure([target])
 
     names = tuple(p.capability for p in projectors)

@@ -143,4 +143,4 @@ def get(name: str) -> Capability:
         return REGISTRY[name]
     except KeyError:
         known = ", ".join(sorted(REGISTRY)) or "none registered"
-        raise CapabilityUnknownError(f"unknown capability {name!r}; known: {known}") from None
+        raise CapabilityUnknownError(name, known) from None

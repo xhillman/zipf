@@ -94,9 +94,9 @@ def _write_token(token: Mapping[str, Any]) -> None:
 def _client_credentials() -> tuple[str, str]:
     settings = load_settings()
     if not settings.gsc_client_id:
-        raise CredentialMissingError(capability=CAPABILITY, variable="GSC_CLIENT_ID")
+        raise CredentialMissingError(variable="GSC_CLIENT_ID", needed_by="Search Console")
     if not settings.gsc_client_secret:
-        raise CredentialMissingError(capability=CAPABILITY, variable="GSC_CLIENT_SECRET")
+        raise CredentialMissingError(variable="GSC_CLIENT_SECRET", needed_by="Search Console")
     return settings.gsc_client_id, settings.gsc_client_secret
 
 
@@ -187,7 +187,8 @@ def _refresh(token: Mapping[str, Any]) -> dict[str, Any]:
     if not refresh_token:
         raise VendorError(
             capability=CAPABILITY,
-            detail="stored token has no refresh_token; run `zipf gsc auth` again",
+            detail="the stored Google token cannot be refreshed.",
+            fix="Run `zipf gsc auth` to authorise again.",
         )
 
     refreshed = _post_token(

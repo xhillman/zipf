@@ -29,6 +29,7 @@ from zipf.clock import from_iso, now, now_iso
 from zipf.config import missing_credentials
 from zipf.db.connection import transaction
 from zipf.errors import CredentialMissingError, VendorError, ZipfError
+from zipf.jobs.describe import job_kind
 from zipf.pricing import PriceEstimate
 from zipf.projections.rebuild import project
 
@@ -111,7 +112,9 @@ def _assert_credentials(cap: Capability) -> None:
     """Fail before the socket if a required credential is not configured."""
     missing = missing_credentials(cap.requires)
     if missing:
-        raise CredentialMissingError(capability=cap.name, variable=", ".join(missing))
+        raise CredentialMissingError(
+            variable=" and ".join(missing), needed_by=f"`zipf {job_kind(cap.name)}`"
+        )
 
 
 def _lookup_cached(

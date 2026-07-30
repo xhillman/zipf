@@ -23,7 +23,7 @@ from zipf.clock import age_of, elapsed_between
 from zipf.config import DEFAULT_CONFIG_TOML, Paths, load_settings
 from zipf.db.connection import connect
 from zipf.db.migrate import migrate
-from zipf.errors import CredentialMissingError, ZipfError
+from zipf.errors import ConfigMissingError, ZipfError
 from zipf.jobs import queue as job_queue
 from zipf.jobs.describe import job_depth, job_kind, job_subject
 from zipf.jobs.runner import JobRunner
@@ -298,7 +298,11 @@ def gsc_import(
     """Import your own Search Console queries. Free."""
     target = site_url or load_settings().gsc_site_url
     if not target:
-        raise CredentialMissingError(capability="gsc.search_analytics", variable="gsc_site_url")
+        raise ConfigMissingError(
+            setting="gsc_site_url",
+            config_path=str(Paths.resolve().config_file),
+            flag="--site",
+        )
 
     async def work(conn: sqlite3.Connection) -> gsc_service.ImportResult:
         return await gsc_service.import_queries(
@@ -422,7 +426,11 @@ def gap(
     """
     own = mine or load_settings().own_domain
     if not own:
-        raise CredentialMissingError(capability="labs.domain_intersection", variable="own_domain")
+        raise ConfigMissingError(
+            setting="own_domain",
+            config_path=str(Paths.resolve().config_file),
+            flag="--mine",
+        )
 
     def run(conn: sqlite3.Connection) -> None:
         plan = gap_service.plan(conn, competitor, own, limit=limit, force=force)
@@ -625,7 +633,9 @@ def main() -> None:
     try:
         app()
     except ZipfError as exc:
-        console.print(f"[red]error[/] {exc}")
+        console.print(f"[red]error[/] {exc.problem}")
+        if exc.fix:
+            console.print(f"      [dim]{exc.fix}[/]")
         raise SystemExit(1) from exc
 
 

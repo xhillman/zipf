@@ -39,7 +39,8 @@ def auth_header(capability: str) -> dict[str, str]:
     settings = load_settings()
     if not settings.dataforseo_login or not settings.dataforseo_password:
         raise CredentialMissingError(
-            capability=capability, variable="DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD"
+            variable="DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD",
+            needed_by="Paid keyword data",
         )
     raw = f"{settings.dataforseo_login}:{settings.dataforseo_password}".encode()
     return {"Authorization": f"Basic {base64.b64encode(raw).decode()}"}

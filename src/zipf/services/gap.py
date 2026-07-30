@@ -95,9 +95,15 @@ def plan(
     competitor_clean = competitor.strip().lower()
     mine_clean = mine.strip().lower()
     if not competitor_clean or not mine_clean:
-        raise InvalidRequestError("gap needs both a competitor domain and your own domain")
+        raise InvalidRequestError(
+            "A gap needs two domains: theirs and yours.",
+            fix="Pass a competitor domain, and set own_domain in config or pass --mine.",
+        )
     if competitor_clean == mine_clean:
-        raise InvalidRequestError("gap between a domain and itself is always empty")
+        raise InvalidRequestError(
+            f"{competitor_clean} cannot be compared with itself.",
+            fix="Pass a competitor domain different from your own.",
+        )
 
     capped = min(limit, labs.MAX_LIMIT)
     params: dict[str, Any] = {

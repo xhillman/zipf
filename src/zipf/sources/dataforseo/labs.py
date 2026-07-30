@@ -12,6 +12,7 @@ from typing import Any, Final
 
 import httpx
 
+from zipf.errors import InvalidRequestError
 from zipf.pricing import PriceEstimate
 from zipf.sources.dataforseo import client
 
@@ -54,11 +55,12 @@ def _estimate(rows: int) -> PriceEstimate:
 def build_search_volume(params: Mapping[str, Any]) -> httpx.Request:
     keywords = list(params["keywords"])
     if not keywords:
-        raise ValueError("labs.search_volume requires at least one keyword")
+        raise InvalidRequestError("No keywords were given to price.")
     if len(keywords) > MAX_KEYWORDS_PER_CALL:
-        raise ValueError(
-            f"labs.search_volume accepts at most {MAX_KEYWORDS_PER_CALL} keywords per call, "
-            f"got {len(keywords)}"
+        raise InvalidRequestError(
+            f"{len(keywords):,} keywords is more than one call can carry "
+            f"(the limit is {MAX_KEYWORDS_PER_CALL:,}).",
+            fix="Split them across separate `zipf vol` runs.",
         )
 
     return client.build_task_request(

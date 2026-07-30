@@ -105,8 +105,15 @@ def test_r2_raw_response_is_append_only(db: sqlite3.Connection, statement: str) 
         "VALUES ('t', 'h', '{}', x'00', 1.5, '2026-07-01T00:00:00Z')"
     )
 
-    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+    with pytest.raises(sqlite3.IntegrityError) as caught:
         db.execute(statement)
+
+    message = str(caught.value)
+    assert "cannot be" in message, f"the refusal did not say what was refused: {message}"
+    assert "rebuild" in message, "the refusal named no way forward"
+    # The message is read by whoever hit it, holding a shell prompt. An invariant
+    # tag tells them nothing they can act on.
+    assert "R2" not in message, "a user-facing message leaked an internal invariant name"
 
     row = db.execute("SELECT cost_usd FROM raw_response").fetchone()
     assert row["cost_usd"] == 1.5
