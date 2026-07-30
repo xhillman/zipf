@@ -329,6 +329,9 @@ def vol(
     force: bool = typer.Option(False, "--force", help="Re-buy even keywords that are still fresh."),
     wait: bool = typer.Option(False, "--wait", help="Drain the queue before returning."),
     flat: bool = typer.Option(False, "--flat", help="Show every phrasing, uncollapsed."),
+    cached: bool = typer.Option(
+        False, "--cached", help="Read stored data only. Never prompts, never spends."
+    ),
 ) -> None:
     """Search volume for keywords. Tier 1, paid.
 
@@ -346,6 +349,11 @@ def vol(
 
         if plan.is_free:
             console.print("[green]all cached[/] nothing to buy")
+        elif cached:
+            console.print(
+                f"[dim]--cached: {len(plan.stale)} keyword(s) not stored, "
+                f"skipping the ${plan.estimate.usd:.5f} pull[/]"
+            )
         elif dry_run:
             console.print(
                 f"[cyan]dry run[/] would buy {len(plan.stale)} keyword(s) "
@@ -364,8 +372,9 @@ def vol(
                 _drain(conn)
         else:
             console.print("[yellow]cancelled[/] nothing queued, nothing spent")
-            return
 
+        # Always show what is owned, including after a decline. Refusing to buy
+        # more is not a reason to hide what was already paid for.
         rows = volume_service.read_rows(conn, plan.requested)
         if flat:
             _print_volumes_flat(rows)
@@ -386,16 +395,32 @@ def gap(
     yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
     wait: bool = typer.Option(False, "--wait", help="Drain the queue before returning."),
     flat: bool = typer.Option(False, "--flat", help="Show every phrasing, uncollapsed."),
+    force: bool = typer.Option(False, "--force", help="Re-buy even if a fresh pull is stored."),
+    cached: bool = typer.Option(
+        False, "--cached", help="Read stored data only. Never prompts, never spends."
+    ),
 ) -> None:
-    """Keywords a competitor ranks for and you do not. Tier 1, paid."""
+    """Keywords a competitor ranks for and you do not. Tier 1, paid.
+
+    Reading a gap you already own is free and silent. You are only asked to pay
+    when the stored pull is missing or past its TTL.
+    """
     own = mine or load_settings().own_domain
     if not own:
         raise CredentialMissingError(capability="labs.domain_intersection", variable="own_domain")
 
     def run(conn: sqlite3.Connection) -> None:
-        plan = gap_service.plan(competitor, own, limit=limit)
+        plan = gap_service.plan(conn, competitor, own, limit=limit, force=force)
 
-        if dry_run:
+        if plan.is_fresh:
+            age_days = (plan.age.total_seconds() / 86400) if plan.age else 0.0
+            console.print(f"[green]cached[/] pulled {age_days:.1f}d ago · nothing to buy · $0.00")
+        elif cached:
+            console.print(
+                f"[dim]--cached: no stored pull for {plan.competitor}, "
+                f"skipping the ${plan.estimate.usd:.5f} pull[/]"
+            )
+        elif dry_run:
             console.print(
                 f"[cyan]dry run[/] would buy up to {plan.limit:,} rows for "
                 f"${plan.estimate.usd:.5f} · spent $0.00"
@@ -414,7 +439,6 @@ def gap(
                 _drain(conn)
         else:
             console.print("[yellow]cancelled[/] nothing queued, nothing spent")
-            return
 
         rows = gap_service.read_rows(conn, plan.competitor, plan.mine)
         if flat:

@@ -12,9 +12,13 @@ rather than positional at every call site.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
+from zipf import capabilities
+from zipf.clock import from_iso, now, to_iso
 from zipf.errors import InvalidRequestError
 from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
@@ -29,13 +33,64 @@ class GapPlan:
     limit: int
     estimate: PriceEstimate
     params: dict[str, Any]
+    #: Age of the stored pull that already covers this request, if any.
+    age: timedelta | None = None
+
+    @property
+    def is_fresh(self) -> bool:
+        """Whether this request is already answered by data we own."""
+        return self.age is not None
+
+    @property
+    def is_free(self) -> bool:
+        return self.is_fresh
 
 
-def plan(competitor: str, mine: str, *, limit: int = labs.DEFAULT_LIMIT) -> GapPlan:
+def _stored_age(
+    conn: sqlite3.Connection, params: Mapping[str, Any], ttl: timedelta
+) -> timedelta | None:
+    """Age of the newest stored pull that already covers ``params``.
+
+    Matches on the domain pair rather than on a params hash, and accepts a stored
+    pull whose ``limit`` was at least as deep as the one requested. A hash match
+    would treat a previous 1,000-row pull as useless to a 100-row request and
+    charge for rows already owned.
+    """
+    cutoff = to_iso(now() - ttl)
+    row = conn.execute(
+        "SELECT fetched_at FROM raw_response "
+        "WHERE capability = ? "
+        "AND json_extract(params_json, '$.target1') = ? "
+        "AND json_extract(params_json, '$.target2') = ? "
+        "AND json_extract(params_json, '$.intersections') = 0 "
+        "AND json_extract(params_json, '$.limit') >= ? "
+        "AND fetched_at >= ? "
+        "ORDER BY fetched_at DESC LIMIT 1",
+        (
+            labs.DOMAIN_INTERSECTION,
+            params["target1"],
+            params["target2"],
+            params["limit"],
+            cutoff,
+        ),
+    ).fetchone()
+    return now() - from_iso(row["fetched_at"]) if row is not None else None
+
+
+def plan(
+    conn: sqlite3.Connection,
+    competitor: str,
+    mine: str,
+    *,
+    limit: int = labs.DEFAULT_LIMIT,
+    force: bool = False,
+) -> GapPlan:
     """Price a gap pull without spending anything.
 
-    The row count is the requested ``limit``, because that is what the vendor
-    charges for whether or not the domain has that many keywords.
+    Checks what is already stored first, so reading a gap you already own costs
+    nothing and asks nothing. The row count is the requested ``limit``, because
+    that is what the vendor charges for whether or not the domain has that many
+    keywords.
     """
     competitor_clean = competitor.strip().lower()
     mine_clean = mine.strip().lower()
@@ -51,12 +106,14 @@ def plan(competitor: str, mine: str, *, limit: int = labs.DEFAULT_LIMIT) -> GapP
         "limit": capped,
         "intersections": False,
     }
+    ttl = capabilities.get(labs.DOMAIN_INTERSECTION).ttl
     return GapPlan(
         competitor=competitor_clean,
         mine=mine_clean,
         limit=capped,
         estimate=labs.price_domain_intersection(params),
         params=params,
+        age=None if force else _stored_age(conn, params, ttl),
     )
 
 

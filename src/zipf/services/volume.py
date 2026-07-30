@@ -15,18 +15,19 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any
 
+from zipf import capabilities
 from zipf.clock import now, to_iso
 from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
 from zipf.services.cluster import Cluster, cluster_rows
 from zipf.sources.dataforseo import labs
 
-#: How long a measured volume is trusted. Matches the capability TTL: the
-#: upstream only updates monthly, so a shorter window buys the same number back.
-VOLUME_TTL = timedelta(days=30)
+#: How long a measured volume is trusted. Read from the capability registry so
+#: the TTL has one definition; a second copy here could disagree with the one
+#: ``fetch`` actually enforces.
+VOLUME_TTL = capabilities.get(labs.SEARCH_VOLUME).ttl
 
 #: Capabilities whose responses count as a real measurement. A keyword that only
 #: ever came from autocomplete has been *discovered*, not measured, and its null
