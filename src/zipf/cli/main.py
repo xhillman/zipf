@@ -24,7 +24,7 @@ from zipf.config import DEFAULT_CONFIG_TOML, Paths, load_settings
 from zipf.db.connection import connect
 from zipf.db.migrate import migrate
 from zipf.errors import ConfigMissingError, ZipfError
-from zipf.format import money, number, plural
+from zipf.format import meter, money, number, plural
 from zipf.jobs import queue as job_queue
 from zipf.jobs.describe import job_depth, job_kind, job_subject
 from zipf.jobs.runner import JobRunner
@@ -220,8 +220,9 @@ def default(ctx: typer.Context) -> None:
 
     from zipf.tui.app import ZipfApp
 
+    settings = load_settings()
     with connect(Paths.resolve().db_file, read_only=True) as conn:
-        ZipfApp(conn).run()
+        ZipfApp(conn, budget=_budget(), own_domain=settings.own_domain).run()
 
 
 @app.command()
@@ -670,19 +671,6 @@ def jobs_cancel(
         console.print(f"[yellow]not cancelled[/] job {job_id} is not queued")
 
 
-def _meter(fraction: float, width: int = 10) -> str:
-    """A bar that distinguishes "a sliver" from "nothing".
-
-    Rounding down alone renders 5% as an entirely empty bar, which reads as
-    untouched next to a label saying 5%. A partial block covers the case where
-    something has been spent but less than one segment's worth.
-    """
-    filled = min(width, max(0, int(fraction * width)))
-    if filled == 0 and fraction > 0:
-        return "▒" + "░" * (width - 1)
-    return "▓" * filled + "░" * (width - filled)
-
-
 #: Every table worth counting. Listed rather than derived: `observation` has no
 #: projector until the SERP and LLM milestones, and a stats view that silently
 #: omitted it would be misleading.
@@ -737,7 +725,7 @@ def budget(
     # of them leads and the rest explains it.
     console.print(
         f"[bold]${state.effective_limit:.2f} available[/]  "
-        f"{_meter(state.used_fraction)}  [dim]{state.used_fraction:.0%} used[/]"
+        f"{meter(state.used_fraction)}  [dim]{state.used_fraction:.0%} used[/]"
     )
 
     if state.balance is None:

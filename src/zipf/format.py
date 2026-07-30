@@ -32,3 +32,16 @@ def number(value: float | None, fmt: str = ",") -> str:
 
 def money(value: float | None) -> str:
     return f"${value:.2f}" if value is not None else ABSENT
+
+
+def meter(fraction: float, width: int = 10) -> str:
+    """A bar that distinguishes "a sliver" from "nothing".
+
+    Rounding down alone renders 5% as an entirely empty bar, which reads as
+    untouched next to a label saying 5%. A partial block covers the case where
+    something has been spent but less than one segment's worth.
+    """
+    filled = min(width, max(0, int(fraction * width)))
+    if filled == 0 and fraction > 0:
+        return "▒" + "░" * (width - 1)
+    return "▓" * filled + "░" * (width - filled)

@@ -7,6 +7,34 @@
  */
 $spend: #d78700;
 
-#cache-summary {
-    padding: 1 2;
+#status {
+    height: 1;
+    background: $panel;
+}
+
+#body {
+    height: 1fr;
+}
+
+#sidebar {
+    width: 24;
+    border-right: solid $panel;
+    padding: 0 1;
+}
+
+#main {
+    width: 1fr;
+}
+
+/* The table takes whatever the detail pane does not. Fixed detail height keeps
+ * the row cursor from jumping as you move between keywords with more or fewer
+ * known surfaces. */
+#rows {
+    height: 1fr;
+}
+
+#detail {
+    height: 6;
+    border-top: solid $panel;
+    padding: 0 1;
 }
