@@ -38,10 +38,32 @@ class BudgetStatus:
 
     @property
     def effective_limit(self) -> float:
-        """The smaller of what you allowed and what you actually have."""
+        """The one number that is true: what you can actually still spend.
+
+        The smaller of what you allowed yourself this month and what the vendor
+        will actually let you spend. Everything else on the readout explains this.
+        """
         if self.balance is None:
             return self.remaining
         return min(self.remaining, self.balance)
+
+    @property
+    def limited_by(self) -> str:
+        """Which constraint is actually binding."""
+        if self.balance is not None and self.balance < self.remaining:
+            return "balance"
+        return "ceiling"
+
+    @property
+    def used_fraction(self) -> float:
+        """How much of what you could have spent has been spent.
+
+        Measured against ``spent + effective_limit`` rather than the ceiling. A
+        meter against a $20 ceiling reads 0% while a $0.93 balance is nearly
+        exhausted, which is reassuring and wrong.
+        """
+        total = self.spent + self.effective_limit
+        return self.spent / total if total > 0 else 0.0
 
 
 def cached_balance(conn: sqlite3.Connection) -> tuple[float | None, timedelta | None]:

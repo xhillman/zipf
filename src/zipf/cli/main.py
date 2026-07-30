@@ -20,7 +20,7 @@ from rich.table import Table
 from zipf.budget import Budget
 from zipf.cli.format import money, number, plural
 from zipf.cli.paid import confirm_spend
-from zipf.clock import age_of, elapsed_between
+from zipf.clock import age_of, age_of_delta, elapsed_between
 from zipf.config import DEFAULT_CONFIG_TOML, Paths, load_settings
 from zipf.db.connection import connect
 from zipf.db.migrate import migrate
@@ -569,8 +569,6 @@ def jobs_list(limit: int = typer.Option(20, "--limit")) -> None:
     table = Table(title=f"{len(rows)} recent job(s)")
     table.add_column("id", justify="right", style="dim")
     # One line per job: a queue is scanned vertically, so wrapping costs more
-    # than the truncated tail is worth.
-    # One line per job: a queue is scanned vertically, so wrapping costs more
     # than the truncated tail is worth. Only "what" may be shortened; a
     # truncated status or cost would be actively misleading.
     table.add_column("what", max_width=28, no_wrap=True, overflow="ellipsis")
@@ -657,7 +655,15 @@ def jobs_cancel(
 
 
 def _meter(fraction: float, width: int = 10) -> str:
+    """A bar that distinguishes "a sliver" from "nothing".
+
+    Rounding down alone renders 5% as an entirely empty bar, which reads as
+    untouched next to a label saying 5%. A partial block covers the case where
+    something has been spent but less than one segment's worth.
+    """
     filled = min(width, max(0, int(fraction * width)))
+    if filled == 0 and fraction > 0:
+        return "▒" + "░" * (width - 1)
     return "▓" * filled + "░" * (width - filled)
 
 
@@ -703,7 +709,7 @@ def db_stats() -> None:
 def budget(
     cached: bool = typer.Option(False, "--cached", help="Skip the free vendor balance lookup."),
 ) -> None:
-    """Spend against the ceiling, and the vendor balance that actually limits it."""
+    """What you can still spend, and which limit is actually stopping you."""
     limits = _budget()
 
     async def work(conn: sqlite3.Connection) -> Any:
@@ -711,25 +717,33 @@ def budget(
 
     state = _with_db(work)
 
-    used = state.spent / state.ceiling if state.ceiling else 0.0
+    # One headline. Two limits shown as equals read as confusion, so the smaller
+    # of them leads and the rest explains it.
     console.print(
-        f"spent    ${state.spent:.2f}/${state.ceiling:.2f}  {_meter(used)}  {used:.0%} of ceiling"
+        f"[bold]${state.effective_limit:.2f} available[/]  "
+        f"{_meter(state.used_fraction)}  [dim]{state.used_fraction:.0%} used[/]"
     )
 
-    if state.balance is not None:
-        age = "" if cached else " [dim]live[/]"
-        if state.balance_age and state.balance_age.total_seconds() > 60:
-            age = f" [dim]{state.balance_age.total_seconds() / 60:.0f}m old[/]"
-        console.print(f"balance  ${state.balance:.2f} at DataForSEO{age}")
-
-    if state.ceiling_exceeds_balance:
+    if state.balance is None:
+        console.print(f"  [dim]limited by your ${state.ceiling:.2f} monthly ceiling[/]")
+    elif state.limited_by == "balance":
         console.print(
-            f"[yellow]ceiling is decorative[/] ${state.ceiling:.2f} allowed but only "
-            f"${state.balance:.2f} funded; the real stop is ${state.effective_limit:.2f}"
+            f"  [yellow]limited by your DataForSEO balance[/][dim], not the "
+            f"${state.ceiling:.2f} monthly ceiling[/]"
+        )
+    else:
+        console.print(
+            f"  [dim]limited by your ${state.ceiling:.2f} monthly ceiling, "
+            f"not the ${state.balance:.2f} balance[/]"
         )
 
+    console.print()
+    console.print(f"  spent this month  ${state.spent:.5f} of ${state.ceiling:.2f}")
+    if state.balance is not None:
+        freshness = "live" if not cached else age_of_delta(state.balance_age)
+        console.print(f"  vendor balance    ${state.balance:.2f} at DataForSEO [dim]{freshness}[/]")
     gate = "every spend" if state.threshold <= 0 else f"spends over ${state.threshold:.2f}"
-    console.print(f"[dim]confirms {gate}[/]")
+    console.print(f"  confirms          {gate}")
 
     if state.balance_error:
         console.print(f"[yellow]balance lookup failed[/] {state.balance_error}")

@@ -138,3 +138,71 @@ def test_the_effective_limit_is_the_ceiling_when_well_funded() -> None:
     )
     assert state.ceiling_exceeds_balance is False
     assert state.effective_limit == 18.0
+
+
+def _status(*, spent: float, ceiling: float, balance: float | None) -> budget_service.BudgetStatus:
+    return budget_service.BudgetStatus(
+        spent=spent,
+        ceiling=ceiling,
+        remaining=max(0.0, ceiling - spent),
+        threshold=0.0,
+        balance=balance,
+        balance_age=None,
+    )
+
+
+def test_the_headline_is_the_smaller_of_the_two_limits() -> None:
+    """One number that is true, whichever constraint happens to bind."""
+    balance_bound = _status(spent=0.05, ceiling=20.0, balance=0.91)
+    ceiling_bound = _status(spent=19.0, ceiling=20.0, balance=500.0)
+
+    assert balance_bound.effective_limit == 0.91
+    assert ceiling_bound.effective_limit == 1.0
+
+
+@pytest.mark.parametrize(
+    ("balance", "expected"),
+    [(0.91, "balance"), (500.0, "ceiling"), (None, "ceiling")],
+)
+def test_limited_by_names_the_binding_constraint(balance: float | None, expected: str) -> None:
+    assert _status(spent=0.05, ceiling=20.0, balance=balance).limited_by == expected
+
+
+def test_the_meter_measures_headroom_not_the_ceiling() -> None:
+    """The bug this replaced: a $20 ceiling reads 0% while $0.91 is nearly gone.
+
+    Against spent + available, spending $0.05 of a $0.96 practical budget is 5%.
+    Against the ceiling it would be 0.25%, which is reassuring and wrong.
+    """
+    state = _status(spent=0.05, ceiling=20.0, balance=0.91)
+
+    assert state.used_fraction == pytest.approx(0.05 / 0.96, abs=1e-6)
+    assert state.used_fraction > 0.04, "the meter still reads against the ceiling"
+
+
+def test_the_meter_uses_the_ceiling_when_the_ceiling_binds() -> None:
+    state = _status(spent=5.0, ceiling=20.0, balance=500.0)
+
+    assert state.used_fraction == pytest.approx(0.25)
+
+
+def test_a_fully_spent_month_reads_as_complete() -> None:
+    state = _status(spent=20.0, ceiling=20.0, balance=500.0)
+
+    assert state.effective_limit == 0.0
+    assert state.used_fraction == pytest.approx(1.0)
+
+
+def test_a_zero_headroom_month_does_not_divide_by_zero() -> None:
+    state = _status(spent=0.0, ceiling=20.0, balance=0.0)
+
+    assert state.effective_limit == 0.0
+    assert state.used_fraction == 0.0
+
+
+def test_an_unknown_balance_falls_back_to_the_ceiling() -> None:
+    """A vendor outage must not make the readout claim unlimited funds."""
+    state = _status(spent=0.05, ceiling=20.0, balance=None)
+
+    assert state.effective_limit == pytest.approx(19.95)
+    assert state.ceiling_exceeds_balance is False

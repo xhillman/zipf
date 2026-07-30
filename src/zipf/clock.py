@@ -65,3 +65,8 @@ def elapsed_between(start: str | None, end: str | None) -> str:
     if not start or not end:
         return "—"
     return humanise(from_iso(end) - from_iso(start))
+
+
+def age_of_delta(delta: timedelta | None) -> str:
+    """Compact age from an already-computed delta."""
+    return "—" if delta is None else f"{humanise(delta)} old"
