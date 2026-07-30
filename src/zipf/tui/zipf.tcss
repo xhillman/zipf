@@ -41,9 +41,38 @@ $spend: #d78700;
 
 /* Sits below the detail pane and takes one line, so opening it never reflows
  * the table out from under the row you were looking at. */
-#filter {
+#filter, #command {
     height: 1;
     border: none;
     padding: 0 1;
     background: $panel;
+}
+
+/* The command bar is the only route to a paid action, so it wears the spend
+ * register even before a price is named. */
+#command {
+    color: $spend;
+}
+
+ConfirmModal {
+    align: center middle;
+}
+
+#confirm {
+    width: 52;
+    height: auto;
+    border: round $spend;
+    background: $surface;
+    padding: 1 2;
+}
+
+#confirm-title {
+    color: $spend;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#confirm-keys {
+    margin-top: 1;
+    text-align: right;
 }

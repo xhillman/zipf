@@ -221,8 +221,20 @@ def default(ctx: typer.Context) -> None:
     from zipf.tui.app import ZipfApp
 
     settings = load_settings()
-    with connect(Paths.resolve().db_file, read_only=True) as conn:
-        ZipfApp(conn, budget=_budget(), own_domain=settings.own_domain).run()
+    paths = Paths.resolve()
+    # Two handles, both released here on every exit path. Browsing uses the
+    # read-only one so the screen cannot write; only a typed command reaches the
+    # writable one.
+    with (
+        connect(paths.db_file, read_only=True) as reader,
+        connect(paths.db_file) as writer,
+    ):
+        ZipfApp(
+            reader,
+            write_conn=writer,
+            budget=_budget(),
+            own_domain=settings.own_domain,
+        ).run()
 
 
 @app.command()

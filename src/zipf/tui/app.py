@@ -31,9 +31,12 @@ from textual.widgets import DataTable, Footer, Input, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from zipf.budget import Budget
+from zipf.errors import ZipfError
+from zipf.pricing import PriceEstimate
 from zipf.services import browse
 from zipf.services import budget as budget_service
-from zipf.tui import views
+from zipf.tui import commands, views
+from zipf.tui.confirm import ConfirmModal
 from zipf.tui.views import TableSpec, View
 
 
@@ -44,9 +47,10 @@ class ZipfApp(App[None]):
     TITLE = "zipf"
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("slash", "filter", "filter"),
+        Binding("colon", "command", "command"),
         Binding("s", "sort", "sort"),
         Binding("r", "reload", "refresh"),
-        Binding("escape", "clear_filter", "clear", show=False),
+        Binding("escape", "escape", "back", show=False),
         Binding("q", "quit", "quit"),
     ]
 
@@ -54,11 +58,15 @@ class ZipfApp(App[None]):
         self,
         conn: sqlite3.Connection,
         *,
+        write_conn: sqlite3.Connection | None = None,
         budget: Budget | None = None,
         own_domain: str | None = None,
     ) -> None:
         super().__init__()
         self._conn = conn
+        # Without a write handle the app is a reader: every `:` command that
+        # would enqueue or fetch refuses rather than failing inside SQLite.
+        self._write_conn = write_conn
         # Defaults keep the app constructible without a config file, which is
         # what makes it testable and what makes a first run on an empty database
         # show a screen rather than an error.
@@ -79,10 +87,12 @@ class ZipfApp(App[None]):
                 yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
                 yield Static(id="detail")
                 yield Input(placeholder="filter", id="filter")
+                yield Input(placeholder=":command", id="command")
         yield Footer()
 
     async def on_mount(self) -> None:
         self.query_one("#filter", Input).display = False
+        self.query_one("#command", Input).display = False
         self._build_sidebar()
         self.show_view(View(views.KEYWORDS))
         await self.refresh_status()
@@ -208,8 +218,11 @@ class ZipfApp(App[None]):
         bar.display = True
         bar.focus()
 
-    def action_clear_filter(self) -> None:
-        """Drop the filter and return to the table."""
+    def action_escape(self) -> None:
+        """Back out of whichever bar is open, or drop the filter."""
+        if self.query_one("#command", Input).display:
+            self._hide_command()
+            return
         if self._contains is None and not self.query_one("#filter", Input).display:
             return
         self._contains = None
@@ -240,6 +253,16 @@ class ZipfApp(App[None]):
             return
         self._sort = following
         self._reload_table()
+
+    def action_command(self) -> None:
+        """Open the command bar.
+
+        Spending is typed, never clicked (PRD §9.1). This bar is the only route
+        to a paid action in the whole interface.
+        """
+        bar = self.query_one("#command", Input)
+        bar.display = True
+        bar.focus()
 
     async def action_reload(self) -> None:
         """Re-read everything from the database. Free, and never touches the network.
@@ -288,14 +311,96 @@ class ZipfApp(App[None]):
         Every browse query is bounded and sub-millisecond, so re-querying per
         keystroke costs less than debouncing would. A hidden bar is being cleared
         programmatically and its event is not a filter the user asked for.
+
+        Commands are deliberately not run as you type. A half-typed ``:gap a.com``
+        must not price anything.
         """
-        if not event.input.display:
+        if event.input.id != "filter" or not event.input.display:
             return
         self._contains = event.value or None
         self._reload_table()
 
-    def on_input_submitted(self, _: Input.Submitted) -> None:
-        """Enter keeps the filter and hands focus back to the table."""
-        bar = self.query_one("#filter", Input)
-        bar.display = False
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter applies the filter, or runs the command."""
+        if event.input.id == "command":
+            typed = event.value
+            self._hide_command()
+            if typed.strip():
+                self.run_worker(self._run_command(typed), exclusive=True)
+            return
+
+        self.query_one("#filter", Input).display = False
         self.query_one("#rows", DataTable).focus()
+
+    def _hide_command(self) -> None:
+        bar = self.query_one("#command", Input)
+        bar.display = False
+        bar.value = ""
+        self.query_one("#rows", DataTable).focus()
+
+    # --------------------------------------------------------------- commands
+
+    async def _run_command(self, text: str) -> None:
+        """Run one typed command and apply whatever it reports.
+
+        Runs in a worker so a command that reaches the network leaves the cache
+        browsable while it waits. Expected failures become a message; anything
+        else is left to propagate, because a bug should not be reported as
+        ordinary user error.
+        """
+        try:
+            outcome = await commands.execute(self, text)
+        except ZipfError as exc:
+            self.notify(exc.fix or exc.problem, title=exc.problem, severity="warning")
+            return
+
+        if outcome.view is not None:
+            self.show_view(outcome.view)
+        if outcome.changed:
+            self._build_sidebar()
+            self._reload_table()
+            await self.refresh_status()
+        self.notify(outcome.message, severity=outcome.severity)
+        if outcome.exits:
+            self.exit()
+
+    # The app is its own command context: it already holds both connections, the
+    # budget, and the only thing that can put a modal on screen.
+
+    @property
+    def read(self) -> sqlite3.Connection:
+        return self._conn
+
+    @property
+    def write(self) -> sqlite3.Connection:
+        if self._write_conn is None:
+            raise ZipfError(
+                "This copy of zipf was opened read-only.",
+                fix="Start it with `zipf` rather than constructing it without a write handle.",
+            )
+        return self._write_conn
+
+    @property
+    def budget(self) -> Budget:
+        return self._budget
+
+    @property
+    def own_domain(self) -> str | None:
+        return self._own_domain
+
+    async def confirm(self, estimate: PriceEstimate, *, what: str, detail: str = "") -> bool:
+        """Show the bill and wait for a keypress, when the amount warrants asking.
+
+        Below the threshold nothing is asked — the same rule the CLI follows —
+        but the price still reaches the readout, so a spend is never silent.
+        """
+        if estimate.is_free or not self._budget.needs_confirmation(estimate):
+            return True
+
+        modal = ConfirmModal(
+            estimate, conn=self._conn, budget=self._budget, what=what, detail=detail
+        )
+        # Annotated rather than returned directly: the result type is inferred
+        # from context, and returning into `bool` would solve it as `object`.
+        approved: bool = await self.push_screen_wait(modal)
+        return approved

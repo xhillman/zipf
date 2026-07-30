@@ -15,10 +15,12 @@ from pathlib import Path
 import pytest
 from textual.widgets import DataTable, Input, Static, Tree
 
+from zipf.budget import Budget
 from zipf.db.connection import open_ro
 from zipf.errors import DatabaseMissingError
 from zipf.tui import views
 from zipf.tui.app import ZipfApp
+from zipf.tui.confirm import ConfirmModal
 
 
 @pytest.fixture
@@ -323,3 +325,150 @@ async def test_reload_makes_no_network_call(seeded: sqlite3.Connection) -> None:
         await pilot.press("r")
         await pilot.pause()
         assert "left" in str(app.query_one("#status", Static).render())
+
+
+async def _type(pilot: object, text: str) -> None:
+    """Type a string into whichever bar has focus."""
+    for character in text:
+        await pilot.press("space" if character == " " else character)  # type: ignore[attr-defined]
+
+
+async def test_colon_opens_the_command_bar(seeded: sqlite3.Connection) -> None:
+    """Paid actions are typed, never clicked: this bar is the only route."""
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await pilot.pause()
+        bar = app.query_one("#command", Input)
+        assert bar.display and bar.has_focus
+
+
+async def test_a_command_is_not_run_as_it_is_typed(seeded: sqlite3.Connection) -> None:
+    """A half-typed `:gap a.com` must not price anything."""
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await _type(pilot, "gap ahrefs.com")
+        await pilot.pause()
+        assert app.screen is app.screen  # no modal was pushed
+        assert seeded.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 0
+
+
+async def test_escape_closes_the_command_bar_without_running_it(
+    seeded: sqlite3.Connection,
+) -> None:
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await _type(pilot, "gap ahrefs.com")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.query_one("#command", Input).display
+        assert seeded.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 0
+
+
+async def test_a_paid_command_shows_the_modal_and_enqueues_on_enter(
+    seeded: sqlite3.Connection,
+) -> None:
+    """The whole gate, driven by keypresses: type, confirm, queue."""
+    app = ZipfApp(seeded, write_conn=seeded, budget=Budget(ceiling_usd=20.0, threshold_usd=0.0))
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await _type(pilot, "gap ahrefs.com --mine mine.com")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConfirmModal)
+        body = str(app.screen.query_one("#confirm-body", Static).render())
+        assert "not cached" in body
+        assert "$0.0240" in body  # the price is stated before the keypress
+        assert "remaining this month" in body
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert seeded.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 1
+
+
+async def test_declining_the_modal_queues_nothing(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded, write_conn=seeded, budget=Budget(ceiling_usd=20.0, threshold_usd=0.0))
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await _type(pilot, "gap ahrefs.com --mine mine.com")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmModal)
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+    assert seeded.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 0
+
+
+async def test_a_paid_command_writes_no_raw_response(seeded: sqlite3.Connection) -> None:
+    """R5 through the real UI: approving queues work, it does not call a vendor."""
+    before = seeded.execute("SELECT COUNT(*) AS n FROM raw_response").fetchone()["n"]
+    app = ZipfApp(seeded, write_conn=seeded, budget=Budget(ceiling_usd=20.0, threshold_usd=0.0))
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await _type(pilot, "gap ahrefs.com --mine mine.com")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert seeded.execute("SELECT COUNT(*) AS n FROM raw_response").fetchone()["n"] == before
+
+
+async def test_an_unknown_command_reports_rather_than_crashing(
+    seeded: sqlite3.Connection,
+) -> None:
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await _type(pilot, "frobnicate")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.is_running  # survived
+        assert not app.query_one("#command", Input).display
+
+
+async def test_quit_command_closes_the_app(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await _type(pilot, "q")
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.return_value is None
+
+
+async def test_without_a_write_handle_a_command_refuses(seeded: sqlite3.Connection) -> None:
+    """A reader-only app says so rather than failing inside SQLite."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await _type(pilot, "gap ahrefs.com --mine mine.com")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.is_running
+    assert seeded.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 0
+
+
+async def test_below_the_threshold_nothing_is_asked(seeded: sqlite3.Connection) -> None:
+    """Default to silence: a spend under the threshold enqueues without a modal.
+
+    The shipped config sets the threshold to $0.00 so every spend is confirmed,
+    but the mechanism has to work for anyone who raises it — a $0.024 gap under
+    a $1.00 threshold goes straight to the queue.
+    """
+    app = ZipfApp(seeded, write_conn=seeded, budget=Budget(ceiling_usd=20.0, threshold_usd=1.0))
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        app.query_one("#command", Input).value = "gap ahrefs.com --mine mine.com"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert not isinstance(app.screen, ConfirmModal)
+
+    assert seeded.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 1

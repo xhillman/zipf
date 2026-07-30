@@ -1,0 +1,233 @@
+"""The `:` commands.
+
+The registry takes a ``Context``, so these run without Textual: a fake context
+that always approves, and one that always declines, cover both sides of the
+confirmation gate. The invariant that matters most is asserted directly — no
+command writes a ``raw_response`` row, because commands enqueue and the runner
+spends (R5).
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass, field
+
+import httpx
+import pytest
+import respx
+
+from zipf.budget import Budget
+from zipf.clock import now_iso
+from zipf.errors import InvalidRequestError
+from zipf.pricing import PriceEstimate
+from zipf.projections.rebuild import count_rows
+from zipf.sources.autocomplete import ENDPOINT
+from zipf.tui import commands, views
+
+
+def _stored(conn: sqlite3.Connection, capability: str, params: str) -> int:
+    """Record a vendor response, the way a completed fetch would have."""
+    cursor = conn.execute(
+        "INSERT INTO raw_response (capability, params_hash, params_json, body, cost_usd, "
+        "fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (capability, f"h{params}", params, b"{}", 0.05, now_iso()),
+    )
+    return int(cursor.lastrowid or 0)
+
+
+@dataclass
+class FakeContext:
+    """A command context that answers the confirmation without a screen."""
+
+    read: sqlite3.Connection
+    write: sqlite3.Connection
+    budget: Budget = field(default_factory=lambda: Budget(ceiling_usd=20.0, threshold_usd=0.25))
+    own_domain: str | None = "mine.com"
+    approve: bool = True
+    asked: list[str] = field(default_factory=list)
+
+    async def confirm(self, estimate: PriceEstimate, *, what: str, detail: str = "") -> bool:
+        self.asked.append(what)
+        return self.approve
+
+
+@pytest.fixture
+def context(db: sqlite3.Connection) -> FakeContext:
+    return FakeContext(read=db, write=db)
+
+
+def test_parsing_keeps_quoted_keywords_whole() -> None:
+    command, args = commands.parse(':vol "best crm software" "free crm"')
+    assert command.name == "vol"
+    assert args == ["best crm software", "free crm"]
+
+
+def test_the_leading_colon_is_optional() -> None:
+    assert commands.parse("budget")[0].name == "budget"
+    assert commands.parse(":budget")[0].name == "budget"
+
+
+def test_aliases_resolve_to_one_command() -> None:
+    assert commands.parse(":q")[0].name == "quit"
+    assert commands.parse(":exit")[0].name == "quit"
+
+
+def test_an_unknown_command_lists_the_real_ones() -> None:
+    with pytest.raises(InvalidRequestError) as caught:
+        commands.parse(":frobnicate")
+    assert ":gap" in str(caught.value.fix)
+
+
+def test_unbalanced_quotes_are_reported_not_raised_raw() -> None:
+    """shlex raises ValueError; the user needs a sentence, not a traceback."""
+    with pytest.raises(InvalidRequestError) as caught:
+        commands.parse(':vol "unclosed')
+    assert "quotes" in str(caught.value.fix)
+
+
+def test_flags_are_pulled_out_of_the_arguments() -> None:
+    value, rest = commands.take_flag(["ahrefs.com", "--mine", "me.com"], "--mine")
+    assert value == "me.com"
+    assert rest == ["ahrefs.com"]
+
+    switch, rest = commands.take_switch(["a", "--force", "b"], "--force")
+    assert switch is True
+    assert rest == ["a", "b"]
+
+
+def test_a_flag_without_a_value_says_so() -> None:
+    with pytest.raises(InvalidRequestError):
+        commands.take_flag(["ahrefs.com", "--mine"], "--mine")
+
+
+async def test_a_command_with_no_arguments_gives_an_example(context: FakeContext) -> None:
+    with pytest.raises(InvalidRequestError) as caught:
+        await commands.execute(context, ":gap")
+    assert ":gap ahrefs.com" in str(caught.value.fix)
+
+
+async def test_gap_without_a_domain_of_your_own_names_both_remedies(
+    db: sqlite3.Connection,
+) -> None:
+    context = FakeContext(read=db, write=db, own_domain=None)
+    with pytest.raises(InvalidRequestError) as caught:
+        await commands.execute(context, ":gap ahrefs.com")
+    assert "--mine" in str(caught.value.fix)
+    assert "own_domain" in str(caught.value.fix)
+
+
+async def test_gap_asks_before_spending_and_enqueues_when_approved(
+    context: FakeContext,
+) -> None:
+    outcome = await commands.execute(context, ":gap ahrefs.com")
+    assert context.asked == ["keyword gap · ahrefs.com"]
+    assert "queued job" in outcome.message
+    assert context.write.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 1
+
+
+async def test_declining_queues_nothing(db: sqlite3.Connection) -> None:
+    context = FakeContext(read=db, write=db, approve=False)
+    outcome = await commands.execute(context, ":gap ahrefs.com")
+    assert "nothing queued, nothing spent" in outcome.message
+    assert context.write.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 0
+
+
+async def test_no_command_spends_synchronously(context: FakeContext) -> None:
+    """R5: a paid command enqueues and returns. Only the runner calls a vendor."""
+    before = count_rows(context.write, "raw_response")
+    await commands.execute(context, ":gap ahrefs.com")
+    await commands.execute(context, ':vol "best crm software"')
+    assert count_rows(context.write, "raw_response") == before
+
+
+async def test_a_gap_already_stored_is_read_without_asking(context: FakeContext) -> None:
+    """Reading what you own is free and promptless, as the CLI has been since U1."""
+    _stored(
+        context.write,
+        "labs.domain_intersection",
+        '{"target1": "ahrefs.com", "target2": "mine.com", "limit": 100, "intersections": 0}',
+    )
+    outcome = await commands.execute(context, ":gap ahrefs.com")
+    assert context.asked == []  # never priced, never prompted
+    assert "$0.00" in outcome.message
+    assert outcome.view == views.View(views.GAP, "ahrefs.com|mine.com")
+
+
+async def test_vol_for_keywords_already_owned_costs_nothing(context: FakeContext) -> None:
+    """Freshness needs a *measured* keyword, not merely a known one.
+
+    The keyword is linked to a ``labs.search_volume`` response deliberately: a
+    keyword that autocomplete only suggested must still be priced when asked for,
+    which is the guard ``fresh_keywords`` exists to provide.
+    """
+    raw_id = _stored(context.write, "labs.search_volume", '{"keywords": ["free crm"]}')
+    context.write.execute(
+        "INSERT INTO keyword (keyword, volume, updated_at, raw_id) VALUES (?, ?, ?, ?)",
+        ("free crm", 9900, now_iso(), raw_id),
+    )
+    outcome = await commands.execute(context, ':vol "free crm"')
+    assert context.asked == []
+    assert "$0.00" in outcome.message
+
+
+async def test_a_merely_suggested_keyword_is_still_priced(context: FakeContext) -> None:
+    """The other half of the same rule: known is not the same as measured."""
+    raw_id = _stored(context.write, "autocomplete.suggest", '{"seed": "crm"}')
+    context.write.execute(
+        "INSERT INTO keyword (keyword, updated_at, raw_id) VALUES (?, ?, ?)",
+        ("free crm", now_iso(), raw_id),
+    )
+    await commands.execute(context, ':vol "free crm"')
+    assert context.asked == ["search volume · 1 keyword"]
+
+
+async def test_limit_must_be_a_positive_number(context: FakeContext) -> None:
+    with pytest.raises(InvalidRequestError) as caught:
+        await commands.execute(context, ":gap ahrefs.com --limit nonsense")
+    assert "--limit 100" in str(caught.value.fix)
+
+
+async def test_quit_reports_that_it_exits(context: FakeContext) -> None:
+    assert (await commands.execute(context, ":q")).exits is True
+
+
+async def test_help_marks_which_commands_cost_money(context: FakeContext) -> None:
+    message = (await commands.execute(context, ":help")).message
+    assert ":gap*" in message and ":vol*" in message
+    assert ":help*" not in message  # free commands carry no marker
+
+
+async def test_suggest_stores_keywords_and_reports_the_cost(
+    context: FakeContext, blocked_network: respx.MockRouter
+) -> None:
+    """Tier 0 reaches the network but never costs anything, and says so."""
+    route = blocked_network.get(ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            content=json.dumps(["crm", ["best crm software", "free crm"], [], [], {}]).encode(),
+        )
+    )
+
+    outcome = await commands.execute(context, ":suggest crm")
+
+    assert route.called
+    assert "$0.00" in outcome.message
+    assert outcome.view == views.View(views.KEYWORDS)
+    assert count_rows(context.write, "keyword") == 2
+
+
+async def test_suggest_a_second_time_makes_no_request(
+    context: FakeContext, blocked_network: respx.MockRouter
+) -> None:
+    """The whole thesis, reached through the command bar this time."""
+    route = blocked_network.get(ENDPOINT).mock(
+        return_value=httpx.Response(
+            200, content=json.dumps(["crm", ["free crm"], [], [], {}]).encode()
+        )
+    )
+
+    await commands.execute(context, ":suggest crm")
+    await commands.execute(context, ":suggest crm")
+
+    assert route.call_count == 1
