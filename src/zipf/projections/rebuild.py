@@ -21,6 +21,8 @@ PROJECTORS: dict[str, Projector] = {
     keyword.AUTOCOMPLETE.capability: keyword.AUTOCOMPLETE,
     gsc_query.SEARCH_ANALYTICS.capability: gsc_query.SEARCH_ANALYTICS,
     keyword.SEARCH_VOLUME.capability: keyword.SEARCH_VOLUME,
+    keyword.BULK_KEYWORD_DIFFICULTY.capability: keyword.BULK_KEYWORD_DIFFICULTY,
+    keyword.SEARCH_INTENT.capability: keyword.SEARCH_INTENT,
     keyword_month.KEYWORDS_FOR_KEYWORDS.capability: keyword_month.KEYWORDS_FOR_KEYWORDS,
     domain_keyword.RANKED_KEYWORDS.capability: domain_keyword.RANKED_KEYWORDS,
     domain_keyword.DOMAIN_INTERSECTION.capability: domain_keyword.DOMAIN_INTERSECTION,

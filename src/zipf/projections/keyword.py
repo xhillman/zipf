@@ -91,3 +91,80 @@ SEARCH_VOLUME = Projector(
     tables=("keyword",),
     apply=apply_search_volume,
 )
+
+
+#: Attribute upserts touch their own column and nothing else.
+#:
+#: On conflict they deliberately leave ``updated_at`` and ``raw_id`` alone. Those
+#: two record *which paid measurement* a keyword's volume came from, and
+#: ``fresh_keywords`` joins them against the measuring capabilities to decide
+#: whether volume needs buying. Repointing ``raw_id`` at a difficulty response
+#: would make an already-measured keyword look unmeasured, and the next
+#: ``zipf vol`` would buy its volume a second time.
+_UPSERT_DIFFICULTY = """
+INSERT INTO keyword (keyword, difficulty, updated_at, raw_id)
+VALUES (:keyword, :difficulty, :updated_at, :raw_id)
+ON CONFLICT (keyword) DO UPDATE SET difficulty = excluded.difficulty
+"""
+
+_UPSERT_INTENT = """
+INSERT INTO keyword (keyword, intent, intent_probability, updated_at, raw_id)
+VALUES (:keyword, :intent, :intent_probability, :updated_at, :raw_id)
+ON CONFLICT (keyword) DO UPDATE SET
+  intent             = excluded.intent,
+  intent_probability = excluded.intent_probability
+"""
+
+
+def _upsert_attribute(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    records: Sequence[Mapping[str, Any]],
+    statement: str,
+    fields: Sequence[str],
+) -> int:
+    payload = [
+        {
+            "keyword": record["keyword"],
+            **{field: record.get(field) for field in fields},
+            "updated_at": row["fetched_at"],
+            "raw_id": row["id"],
+        }
+        for record in records
+        if record.get("keyword")
+    ]
+    conn.executemany(statement, payload)
+    return len(payload)
+
+
+def apply_bulk_keyword_difficulty(conn: sqlite3.Connection, row: sqlite3.Row) -> int:
+    return _upsert_attribute(
+        conn,
+        row,
+        labs.parse_bulk_keyword_difficulty(row["body"], {}),
+        _UPSERT_DIFFICULTY,
+        ("difficulty",),
+    )
+
+
+def apply_search_intent(conn: sqlite3.Connection, row: sqlite3.Row) -> int:
+    return _upsert_attribute(
+        conn,
+        row,
+        labs.parse_search_intent(row["body"], {}),
+        _UPSERT_INTENT,
+        ("intent", "intent_probability"),
+    )
+
+
+BULK_KEYWORD_DIFFICULTY = Projector(
+    capability=labs.BULK_KEYWORD_DIFFICULTY,
+    tables=("keyword",),
+    apply=apply_bulk_keyword_difficulty,
+)
+
+SEARCH_INTENT = Projector(
+    capability=labs.SEARCH_INTENT,
+    tables=("keyword",),
+    apply=apply_search_intent,
+)

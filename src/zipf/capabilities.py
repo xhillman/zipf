@@ -130,6 +130,35 @@ REGISTRY: dict[str, Capability] = {
         validate=lambda body: dfs_client.validate(labs.SEARCH_VOLUME, body),
         cost_from_response=dfs_client.actual_cost,
     ),
+    labs.BULK_KEYWORD_DIFFICULTY: Capability(
+        name=labs.BULK_KEYWORD_DIFFICULTY,
+        tier=1,
+        # Difficulty moves with link profiles, which change over months rather
+        # than days. Matched to the volume TTL: both describe a competitive
+        # landscape, and refreshing one without the other invites comparing
+        # figures measured weeks apart.
+        ttl=timedelta(days=30),
+        build=labs.build_bulk_keyword_difficulty,
+        parse=labs.parse_bulk_keyword_difficulty,
+        price=labs.price_bulk_keyword_difficulty,
+        requires=("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
+        validate=lambda body: dfs_client.validate(labs.BULK_KEYWORD_DIFFICULTY, body),
+        cost_from_response=dfs_client.actual_cost,
+    ),
+    labs.SEARCH_INTENT: Capability(
+        name=labs.SEARCH_INTENT,
+        tier=1,
+        # Intent is a property of the phrase, not of a market or a moment. What
+        # someone means by "how to fix a leaky tap" does not drift, so this is
+        # the longest TTL on any paid capability.
+        ttl=timedelta(days=90),
+        build=labs.build_search_intent,
+        parse=labs.parse_search_intent,
+        price=labs.price_search_intent,
+        requires=("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
+        validate=lambda body: dfs_client.validate(labs.SEARCH_INTENT, body),
+        cost_from_response=dfs_client.actual_cost,
+    ),
     labs.RANKED_KEYWORDS: Capability(
         name=labs.RANKED_KEYWORDS,
         tier=1,

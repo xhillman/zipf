@@ -19,6 +19,8 @@ from zipf.sources.dataforseo import client
 SEARCH_VOLUME: Final = "labs.search_volume"
 RANKED_KEYWORDS: Final = "labs.ranked_keywords"
 DOMAIN_INTERSECTION: Final = "labs.domain_intersection"
+BULK_KEYWORD_DIFFICULTY: Final = "labs.bulk_keyword_difficulty"
+SEARCH_INTENT: Final = "labs.search_intent"
 
 # Measured against the live API on 2026-07-29 with 1 and 5 keywords:
 #   1 keyword  -> $0.01212
@@ -31,6 +33,9 @@ PER_ROW_USD: Final = 0.00012
 
 #: Vendor caps a single keyword_overview call at 700 keywords.
 MAX_KEYWORDS_PER_CALL: Final = 700
+
+#: The bulk attribute endpoints take more per call than keyword_overview does.
+MAX_BULK_KEYWORDS: Final = 1000
 
 #: Conservative default depth for domain-wide pulls. A large domain can return
 #: tens of thousands of rows, and the caller pays for the depth it asks for.
@@ -183,6 +188,109 @@ def parse_domain_intersection(body: bytes, params: Mapping[str, Any]) -> list[di
                 "target1_url": first.get("url"),
                 "target2_position": second.get("rank_absolute"),
                 "target2_url": second.get("url"),
+            }
+        )
+    return rows
+
+
+# --------------------------------------------------------------------------
+# labs.bulk_keyword_difficulty — can I realistically rank for this
+# --------------------------------------------------------------------------
+#
+# Volume, cpc and competition all describe an *advertising* market. Difficulty
+# is the only figure here that answers the organic question, which is the one a
+# gap list exists to raise.
+
+
+def _bulk_keywords(params: Mapping[str, Any], command: str) -> list[str]:
+    """Validate a bulk keyword list against the vendor's per-call cap."""
+    keywords = list(params["keywords"])
+    if not keywords:
+        raise InvalidRequestError("No keywords were given.")
+    if len(keywords) > MAX_BULK_KEYWORDS:
+        raise InvalidRequestError(
+            f"{len(keywords):,} keywords is more than one call can carry "
+            f"(the limit is {MAX_BULK_KEYWORDS:,}).",
+            fix=f"Split them across separate `{command}` runs.",
+        )
+    return keywords
+
+
+def build_bulk_keyword_difficulty(params: Mapping[str, Any]) -> httpx.Request:
+    return client.build_task_request(
+        BULK_KEYWORD_DIFFICULTY,
+        "/dataforseo_labs/google/bulk_keyword_difficulty/live",
+        {
+            "keywords": _bulk_keywords(params, "zipf enrich"),
+            "location_code": int(params.get("location_code", client.DEFAULT_LOCATION_CODE)),
+            "language_code": str(params.get("language_code", client.DEFAULT_LANGUAGE_CODE)),
+        },
+    )
+
+
+def price_bulk_keyword_difficulty(params: Mapping[str, Any]) -> PriceEstimate:
+    return _estimate(len(list(params.get("keywords", []))))
+
+
+def parse_bulk_keyword_difficulty(body: bytes, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """One record per keyword, carrying a 0-100 difficulty."""
+    rows: list[dict[str, Any]] = []
+    for item in client.items_of(client.task_results(BULK_KEYWORD_DIFFICULTY, body)):
+        keyword = item.get("keyword")
+        if isinstance(keyword, str) and keyword:
+            rows.append(
+                {
+                    "keyword": keyword.strip().lower(),
+                    "difficulty": item.get("keyword_difficulty"),
+                }
+            )
+    return rows
+
+
+# --------------------------------------------------------------------------
+# labs.search_intent — what the searcher wanted
+# --------------------------------------------------------------------------
+
+
+def build_search_intent(params: Mapping[str, Any]) -> httpx.Request:
+    """Note the absent location.
+
+    This is the one Labs endpoint that takes no location parameter: intent is a
+    property of the phrase rather than of a market. Sending one anyway would put
+    a field in the request that the vendor does not document accepting.
+    """
+    return client.build_task_request(
+        SEARCH_INTENT,
+        "/dataforseo_labs/google/search_intent/live",
+        {
+            "keywords": _bulk_keywords(params, "zipf enrich"),
+            "language_code": str(params.get("language_code", client.DEFAULT_LANGUAGE_CODE)),
+        },
+    )
+
+
+def price_search_intent(params: Mapping[str, Any]) -> PriceEstimate:
+    return _estimate(len(list(params.get("keywords", []))))
+
+
+def parse_search_intent(body: bytes, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """One record per keyword: the winning intent and how sure the vendor is.
+
+    The probability is kept because the label alone hides the difference between
+    a keyword that is 97% navigational and one that is 51% — the second is a
+    coin toss dressed as a classification.
+    """
+    rows: list[dict[str, Any]] = []
+    for item in client.items_of(client.task_results(SEARCH_INTENT, body)):
+        keyword = item.get("keyword")
+        if not isinstance(keyword, str) or not keyword:
+            continue
+        intent = item.get("keyword_intent") or {}
+        rows.append(
+            {
+                "keyword": keyword.strip().lower(),
+                "intent": intent.get("label"),
+                "intent_probability": intent.get("probability"),
             }
         )
     return rows
