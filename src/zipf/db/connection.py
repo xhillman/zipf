@@ -14,7 +14,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
-from zipf.errors import DatabaseMissingError
+from zipf.db.migrate import pending_names
+from zipf.errors import DatabaseMissingError, DatabaseOutdatedError
 
 # WAL lets the TUI read while the job runner writes. NORMAL synchronous is safe
 # under WAL for this workload; the durability gap is a crash mid-commit losing
@@ -54,8 +55,18 @@ def open_ro(path: Path) -> sqlite3.Connection:
     """
     if not path.exists():
         raise DatabaseMissingError(str(path))
+
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, isolation_level=None)
-    _configure(conn, read_only=True)
+    # Released on every failure path. A connection handed back from a function
+    # that raised would be a leak no caller could close.
+    try:
+        _configure(conn, read_only=True)
+        pending = pending_names(conn)
+        if pending:
+            raise DatabaseOutdatedError(str(path), len(pending))
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 

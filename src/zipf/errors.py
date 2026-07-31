@@ -104,6 +104,24 @@ class DatabaseMissingError(ZipfError):
         )
 
 
+class DatabaseOutdatedError(ZipfError):
+    """The database is older than the code reading it.
+
+    Raised only by the read-only path, which cannot fix the problem itself. The
+    read-write path is how it gets fixed, so it does not check — refusing to open
+    there would refuse the very command that migrates.
+    """
+
+    def __init__(self, path: str, pending: int) -> None:
+        self.path = path
+        self.pending = pending
+        migrations = "migration" if pending == 1 else "migrations"
+        super().__init__(
+            f"The database at {path} is {pending} {migrations} behind this version of zipf.",
+            fix="Run `zipf init` to bring it up to date. Nothing stored is lost.",
+        )
+
+
 class VendorError(ZipfError):
     """A vendor returned an error, an unparseable body, or timed out."""
 

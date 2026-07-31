@@ -55,6 +55,25 @@ def _applied(conn: sqlite3.Connection) -> set[str]:
     return {row["name"] for row in rows}
 
 
+def pending_names(conn: sqlite3.Connection) -> list[str]:
+    """Migrations this database has not had applied, in order.
+
+    Safe on a read-only connection, which ``_applied`` is not: that one creates
+    the ledger table if it is absent, and creating a table is a write. The
+    absence of the ledger is checked explicitly rather than by catching the
+    error, so a genuinely broken database still raises.
+    """
+    ledger = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migration'"
+    ).fetchone()
+
+    applied: set[str] = set()
+    if ledger is not None:
+        applied = {row["name"] for row in conn.execute("SELECT name FROM schema_migration")}
+
+    return [migration.name for migration in _load_migrations() if migration.name not in applied]
+
+
 def migrate(conn: sqlite3.Connection) -> list[str]:
     """Apply every unapplied migration. Returns the names applied, in order.
 

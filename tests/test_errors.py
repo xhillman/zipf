@@ -8,14 +8,19 @@ while adding a message in a hurry.
 from __future__ import annotations
 
 import re
+import sqlite3
+from pathlib import Path
 
 import pytest
 
+from zipf.db.connection import connect, open_ro
+from zipf.db.migrate import pending_names
 from zipf.errors import (
     BudgetExceededError,
     CapabilityUnknownError,
     ConfigMissingError,
     CredentialMissingError,
+    DatabaseOutdatedError,
     InvalidRequestError,
     VendorError,
     ZipfError,
@@ -118,3 +123,63 @@ def test_a_vendor_error_keeps_the_status_code() -> None:
 
     assert "429" in error.problem
     assert "rate limited" in error.problem
+
+
+def test_a_database_behind_the_code_names_zipf_init(zipf_home: Path) -> None:
+    """Updating zipf and running a read command must not give a traceback.
+
+    The read-only path cannot migrate, so it has to say who can. This is the
+    realistic failure: pull new code, run `zipf db stats`, hit a table that the
+    unapplied migration was going to create.
+    """
+    database = zipf_home / "zipf.db"
+    with connect(database) as writer:
+        writer.execute(
+            "DELETE FROM schema_migration WHERE name = (SELECT MAX(name) FROM schema_migration)"
+        )
+
+    with pytest.raises(DatabaseOutdatedError) as caught:
+        open_ro(database)
+
+    assert "zipf init" in str(caught.value.fix)
+    assert "1 migration behind" in caught.value.problem
+    assert "Nothing stored is lost" in str(caught.value.fix)
+
+
+def test_a_current_database_opens_read_only(zipf_home: Path) -> None:
+    conn = open_ro(zipf_home / "zipf.db")
+    try:
+        assert conn.execute("SELECT 1 AS n").fetchone()["n"] == 1
+    finally:
+        conn.close()
+
+
+def test_a_database_with_no_ledger_at_all_is_reported(tmp_path: Path) -> None:
+    """A file that is a database but was never migrated by zipf."""
+    stray = tmp_path / "stray.db"
+    sqlite3.connect(stray).close()
+
+    with pytest.raises(DatabaseOutdatedError) as caught:
+        open_ro(stray)
+    assert "zipf init" in str(caught.value.fix)
+
+
+def test_the_read_write_path_is_not_gated_on_being_current(zipf_home: Path) -> None:
+    """`zipf init` is the fix, so the path that runs it must not be refused.
+
+    Only the read-only path checks. Gating the writable path would refuse the
+    very command that migrates, leaving no way forward.
+    """
+    database = zipf_home / "zipf.db"
+    with connect(database) as writer:
+        writer.execute(
+            "DELETE FROM schema_migration WHERE name = (SELECT MAX(name) FROM schema_migration)"
+        )
+
+    with connect(database) as writer:
+        assert pending_names(writer), "the database is now behind"
+        assert writer.execute("SELECT 1 AS n").fetchone()["n"] == 1
+
+
+def test_pending_names_is_empty_on_a_migrated_database(db: sqlite3.Connection) -> None:
+    assert pending_names(db) == []
