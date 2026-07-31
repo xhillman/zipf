@@ -88,9 +88,13 @@ def plan(
     """Price a gap pull without spending anything.
 
     Checks what is already stored first, so reading a gap you already own costs
-    nothing and asks nothing. The row count is the requested ``limit``, because
-    that is what the vendor charges for whether or not the domain has that many
-    keywords.
+    nothing and asks nothing.
+
+    The estimate is a **worst case**: it prices the requested ``limit``, but the
+    vendor bills for rows actually returned. A 100-row request that comes back
+    empty is charged the base fee alone. Over-estimating is the safe direction
+    and the only possible one, since the row count cannot be known before the
+    call; ``zipf jobs show`` reports the difference.
     """
     competitor_clean = competitor.strip().lower()
     mine_clean = mine.strip().lower()

@@ -75,8 +75,14 @@ def plan(
 ) -> RanksPlan:
     """Price a ranked-keywords pull without spending anything.
 
-    The row count is the requested ``limit``, because that is what the vendor
-    charges for whether or not the domain ranks for that many keywords.
+    The estimate is a **worst case**: it prices the requested ``limit``, but the
+    vendor bills for rows actually returned. Measured on 2026-07-30 — a 100-row
+    request against a domain with no ranks was estimated at $0.02400 and charged
+    $0.01200, the base fee with no per-row component.
+
+    Over-estimating is the safe direction and the only possible one, since the
+    row count cannot be known before the call. ``zipf jobs show`` reports the
+    difference, so the gap stays measured rather than assumed.
     """
     cleaned = domain.strip().lower()
     if not cleaned:

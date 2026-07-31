@@ -22,7 +22,7 @@ from zipf.pricing import PriceEstimate
 from zipf.sources import autocomplete, google_oauth, gsc
 from zipf.sources.dataforseo import account as dfs_account
 from zipf.sources.dataforseo import client as dfs_client
-from zipf.sources.dataforseo import labs
+from zipf.sources.dataforseo import keywords_data, labs
 
 type RequestBuilder = Callable[[Mapping[str, Any]], httpx.Request]
 type Parser = Callable[[bytes, Mapping[str, Any]], Any]
@@ -100,6 +100,19 @@ REGISTRY: dict[str, Capability] = {
         price=dfs_account.price,
         requires=("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
         validate=dfs_account.validate,
+    ),
+    keywords_data.CAPABILITY: Capability(
+        name=keywords_data.CAPABILITY,
+        tier=1,
+        # Google Ads refreshes volume monthly, so this matches the Labs volume
+        # TTL. Both ultimately read the same upstream.
+        ttl=timedelta(days=30),
+        build=keywords_data.build,
+        parse=keywords_data.parse,
+        price=keywords_data.price,
+        requires=("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
+        validate=lambda body: dfs_client.validate(keywords_data.CAPABILITY, body),
+        cost_from_response=dfs_client.actual_cost,
     ),
     labs.SEARCH_VOLUME: Capability(
         name=labs.SEARCH_VOLUME,
