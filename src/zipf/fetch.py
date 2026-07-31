@@ -32,6 +32,7 @@ from zipf.errors import CredentialMissingError, VendorError, ZipfError
 from zipf.jobs.describe import job_kind
 from zipf.pricing import PriceEstimate
 from zipf.projections.rebuild import project
+from zipf.ratelimit import LIMITER
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,17 @@ async def _build_request(cap: Capability, normalised: Mapping[str, Any]) -> http
 
 
 async def _send(cap: Capability, request: httpx.Request) -> bytes:
-    """Send the request. The only place an AsyncClient is created (R1)."""
+    """Send the request. The only place an AsyncClient is created (R1).
+
+    Paced first. This runs only on a cache miss, so stored data is never delayed
+    — and because every network path funnels through here, a capability's limit
+    holds whether the caller is the job runner, an inline drain, or a loop inside
+    a service.
+    """
+    waited = await LIMITER.acquire(cap.name, cap.rate_limit_per_minute)
+    if waited:
+        logger.info("%s waited %.1fs for a rate limit slot", cap.name, waited)
+
     async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
         try:
             response = await client.send(request)

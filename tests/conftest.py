@@ -21,6 +21,7 @@ import respx
 from zipf.budget import Budget
 from zipf.db.connection import connect
 from zipf.db.migrate import migrate
+from zipf.ratelimit import LIMITER
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +51,21 @@ def blocked_network(request: pytest.FixtureRequest) -> Iterator[respx.MockRouter
 
     with respx.mock(assert_all_called=False) as router:
         yield router
+
+
+@pytest.fixture(autouse=True)
+def fresh_rate_limiter() -> Iterator[None]:
+    """Start every test with an empty rate-limit window.
+
+    The limiter is process-wide because a vendor's allowance belongs to the
+    account rather than to a caller. That makes it shared state across a test
+    session: without this, sends recorded by one test would pace another, and a
+    capability at twelve per minute would eventually make the suite sleep for a
+    real minute.
+    """
+    LIMITER.reset()
+    yield
+    LIMITER.reset()
 
 
 @pytest.fixture

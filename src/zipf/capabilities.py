@@ -53,6 +53,10 @@ class Capability:
     #: Reads the amount actually charged out of the response, when the vendor
     #: reports it. Falls back to the estimate when absent.
     cost_from_response: CostReader | None = None
+    #: Requests per minute this vendor accepts for this capability, when it has
+    #: published one. ``None`` means unpaced: a limit nobody stated is not a
+    #: limit to invent, and guessing one would slow calls for no reason.
+    rate_limit_per_minute: int | None = None
     #: Returns headers to merge into the request, e.g. a bearer token.
     #:
     #: Auth is deliberately separate from ``build`` because credentials must not
@@ -113,6 +117,7 @@ REGISTRY: dict[str, Capability] = {
         requires=("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
         validate=lambda body: dfs_client.validate(keywords_data.CAPABILITY, body),
         cost_from_response=dfs_client.actual_cost,
+        rate_limit_per_minute=keywords_data.REQUESTS_PER_MINUTE,
     ),
     labs.SEARCH_VOLUME: Capability(
         name=labs.SEARCH_VOLUME,
