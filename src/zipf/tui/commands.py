@@ -29,6 +29,7 @@ from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
 from zipf.services import budget as budget_service
 from zipf.services import gap as gap_service
+from zipf.services import ideas as ideas_service
 from zipf.services import ranks as ranks_service
 from zipf.services import suggest as suggest_service
 from zipf.services import volume as volume_service
@@ -195,6 +196,41 @@ async def _vol(context: Context, args: list[str]) -> Outcome:
     )
 
 
+async def _ideas(context: Context, args: list[str]) -> Outcome:
+    """Discover keywords with volume attached. Tier 1, paid, flat fee.
+
+    The only call here whose price does not move with what you ask for, so the
+    message names the seed count: twenty seeds and one seed cost the same.
+    """
+    force, args = take_switch(args, "--force")
+    _require(args, what="ideas", example=':ideas "crm software" "project management"')
+
+    plan = ideas_service.plan(context.read, args, force=force)
+    if plan.is_fresh:
+        days = plan.age.total_seconds() / 86400 if plan.age else 0.0
+        return Outcome(
+            message=f"already stored, pulled {days:.1f}d ago · $0.00",
+            view=View(views.KEYWORDS),
+        )
+
+    approved = await context.confirm(
+        plan.estimate,
+        what=f"keyword ideas · {plural(len(plan.seeds), 'seed')}",
+        detail=", ".join(plan.seeds),
+    )
+    if not approved:
+        return Outcome(message="cancelled · nothing queued, nothing spent")
+
+    job_id = ideas_service.enqueue(context.write, plan)
+    return Outcome(
+        message=(
+            f"queued job {job_id} for {plural(len(plan.seeds), 'seed')} "
+            f"· flat ${plan.estimate.usd:.2f} when it runs"
+        ),
+        changed=True,
+    )
+
+
 async def _ranks(context: Context, args: list[str]) -> Outcome:
     """What a domain already ranks for, yours by default. Tier 1, paid."""
     limit, args = take_flag(args, "--limit")
@@ -332,6 +368,7 @@ REGISTRY: Final[dict[str, Command]] = {
         Command("suggest", "autocomplete suggestions for a seed", _suggest),
         Command("vol", "search volume for keywords", _vol, spends=True),
         Command("ranks", "what a domain already ranks for", _ranks, spends=True),
+        Command("ideas", "discover keywords with volume attached", _ideas, spends=True),
         Command("gap", "keywords a competitor ranks for and you do not", _gap, spends=True),
     )
 }

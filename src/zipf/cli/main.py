@@ -33,11 +33,13 @@ from zipf.projections.rebuild import rebuild as rebuild_projections
 from zipf.services import budget as budget_service
 from zipf.services import gap as gap_service
 from zipf.services import gsc as gsc_service
+from zipf.services import ideas as ideas_service
 from zipf.services import ranks as ranks_service
 from zipf.services import suggest as suggest_service
 from zipf.services import volume as volume_service
 from zipf.services.cluster import Cluster
 from zipf.sources import gsc as gsc_source
+from zipf.sources.dataforseo import keywords_data
 
 app = typer.Typer(
     name="zipf",
@@ -601,6 +603,107 @@ def _print_ranks(clusters: list[Cluster], total_rows: int, domain: str) -> None:
             (cluster.url or "").removeprefix("https://").removeprefix("http://")[:46],
         )
     console.print(table)
+
+
+def _print_ideas(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        console.print("[dim]nothing stored for these seeds yet; run the job first[/]")
+        return
+
+    seasonal = sum(1 for row in rows if row.get("peak"))
+    title = f"{plural(len(rows), 'keyword')}"
+    if seasonal:
+        title += f" · {seasonal} seasonal"
+
+    table = Table(title=title)
+    table.add_column("keyword")
+    table.add_column("vol", justify="right")
+    table.add_column("cpc", justify="right")
+    table.add_column("comp", justify="right")
+    # Rendered only where there is a real peak. A column of month names on flat
+    # data would read as a recommendation about when to publish.
+    table.add_column("peak", justify="right", style="dim")
+    for row in rows:
+        table.add_row(
+            row["keyword"],
+            number(row["volume"]),
+            money(row["cpc"]),
+            number(row["competition"], ".2f"),
+            row.get("peak", ""),
+        )
+    console.print(table)
+
+
+@app.command()
+def ideas(
+    seeds: Annotated[
+        list[str],
+        typer.Argument(help="Seed keywords. Pass up to 20; one call is one flat charge."),
+    ],
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan and the bill. Spend $0."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
+    wait: bool = typer.Option(False, "--wait", help="Drain the queue before returning."),
+    force: bool = typer.Option(False, "--force", help="Re-buy even if a covering pull is stored."),
+    limit: int = typer.Option(100, "--limit", help="Rows to print. All of them are stored."),
+    cached: bool = typer.Option(
+        False, "--cached", help="Read stored data only. Never prompts, never spends."
+    ),
+) -> None:
+    """Discover keywords, with volume and twelve months of history attached.
+
+    Unlike everything else here, the price does not depend on how much you ask
+    for: one call is a flat charge whether it returns thirty keywords or twenty
+    thousand. Pass every seed you care about at once — asking one question at a
+    time costs the same as asking twenty.
+    """
+
+    def run(conn: sqlite3.Connection) -> None:
+        spent_before = _budget().spent_this_month(conn)
+        plan = ideas_service.plan(conn, seeds, force=force)
+        console.print(
+            f"[dim]{plural(len(plan.seeds), 'seed')} in one call · "
+            f"flat ${plan.estimate.usd:.2f}, however many come back[/]"
+        )
+
+        if plan.is_fresh:
+            age_days = (plan.age.total_seconds() / 86400) if plan.age else 0.0
+            covered = ", ".join(plan.covered_by or [])
+            console.print(f"[green]cached[/] pulled {age_days:.1f}d ago from [{covered}] · $0.00")
+        elif cached:
+            console.print(
+                f"[dim]--cached: no stored pull covers these seeds, "
+                f"skipping the ${plan.estimate.usd:.2f} call[/]"
+            )
+        elif dry_run:
+            console.print(
+                f"[cyan]dry run[/] would buy up to {keywords_data.MAX_SEEDS * 1000:,} keywords "
+                f"for ${plan.estimate.usd:.2f} · spent $0.00"
+            )
+        elif confirm_spend(
+            conn,
+            _budget(),
+            plan.estimate,
+            what=f"keyword ideas · {plural(len(plan.seeds), 'seed')}",
+            detail=", ".join(plan.seeds),
+            assume_yes=yes,
+        ):
+            job_id = ideas_service.enqueue(conn, plan)
+            console.print(f"[green]queued[/] job {job_id}")
+            if wait:
+                _drain(conn)
+        else:
+            console.print("[yellow]cancelled[/] nothing queued, nothing spent")
+
+        rows = ideas_service.read_rows(conn, plan.seeds, limit=limit)
+        _print_ideas(rows)
+
+        _effect(
+            f"{plural(len(rows), 'keyword')} shown",
+            f"{sum(1 for row in rows if row.get('peak'))} seasonal",
+            _spend_since(conn, spent_before),
+        )
+
+    _with_db_sync(run)
 
 
 @app.command()

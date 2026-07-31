@@ -317,3 +317,42 @@ async def test_a_shallower_stored_pull_does_not_cover_a_deeper_request(
     _stored(context.write, "labs.ranked_keywords", '{"domain": "mine.com", "limit": 100}')
     await commands.execute(context, ":ranks --limit 1000")
     assert context.asked == ["ranked keywords · mine.com"]
+
+
+async def test_ideas_prices_flat_and_names_the_seed_count(context: FakeContext) -> None:
+    """The one call whose price does not move with what you ask for."""
+    outcome = await commands.execute(context, ':ideas "crm software" "project management"')
+
+    assert context.asked == ["keyword ideas · 2 seeds"]
+    assert "flat $0.09" in outcome.message
+
+    row = context.write.execute("SELECT capability, estimated_cost FROM job").fetchone()
+    assert row["capability"] == "keywords_data.keywords_for_keywords"
+    assert row["estimated_cost"] == 0.09
+
+
+async def test_ideas_with_no_seeds_gives_an_example(context: FakeContext) -> None:
+    with pytest.raises(InvalidRequestError) as caught:
+        await commands.execute(context, ":ideas")
+    assert ":ideas" in str(caught.value.fix)
+
+
+async def test_a_covering_pull_is_read_without_asking(context: FakeContext) -> None:
+    """Twenty seeds bought once should not be re-bought one seed at a time."""
+    _stored(
+        context.write,
+        "keywords_data.keywords_for_keywords",
+        json.dumps({"seeds": ["crm software", "project management"]}),
+    )
+    outcome = await commands.execute(context, ':ideas "crm software"')
+
+    assert context.asked == []
+    assert "$0.00" in outcome.message
+
+
+async def test_declining_ideas_queues_nothing(db: sqlite3.Connection) -> None:
+    context = FakeContext(read=db, write=db, approve=False)
+    outcome = await commands.execute(context, ':ideas "crm software"')
+
+    assert "nothing queued, nothing spent" in outcome.message
+    assert context.write.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 0
