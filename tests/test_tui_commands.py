@@ -268,3 +268,52 @@ async def test_cancel_needs_a_number(context: FakeContext) -> None:
     with pytest.raises(InvalidRequestError) as caught:
         await commands.execute(context, ":cancel ahrefs.com")
     assert ":cancel 7" in str(caught.value.fix)
+
+
+async def test_ranks_defaults_to_your_own_domain(context: FakeContext) -> None:
+    """The domain worth knowing is yours, so it needs no argument."""
+    await commands.execute(context, ":ranks")
+    assert context.asked == ["ranked keywords · mine.com"]
+
+
+async def test_ranks_accepts_an_explicit_domain(context: FakeContext) -> None:
+    outcome = await commands.execute(context, ":ranks ahrefs.com --limit 200")
+    assert context.asked == ["ranked keywords · ahrefs.com"]
+    assert "queued job" in outcome.message
+
+    row = context.write.execute("SELECT capability, params_json FROM job").fetchone()
+    assert row["capability"] == "labs.ranked_keywords"
+    assert json.loads(row["params_json"]) == {"domain": "ahrefs.com", "limit": 200}
+
+
+async def test_ranks_without_any_domain_names_both_remedies(db: sqlite3.Connection) -> None:
+    context = FakeContext(read=db, write=db, own_domain=None)
+    with pytest.raises(InvalidRequestError) as caught:
+        await commands.execute(context, ":ranks")
+    assert ":ranks example.com" in str(caught.value.fix)
+    assert "own_domain" in str(caught.value.fix)
+
+
+async def test_a_stored_rank_pull_is_read_without_asking(context: FakeContext) -> None:
+    """Reading ranks you already own is free and promptless."""
+    _stored(context.write, "labs.ranked_keywords", '{"domain": "mine.com", "limit": 100}')
+    outcome = await commands.execute(context, ":ranks")
+    assert context.asked == []
+    assert "$0.00" in outcome.message
+    assert outcome.view == views.View(views.DOMAIN, "mine.com")
+
+
+async def test_a_deeper_stored_pull_covers_a_shallower_request(context: FakeContext) -> None:
+    """A 1,000-row pull already contains the first 100. Do not charge twice."""
+    _stored(context.write, "labs.ranked_keywords", '{"domain": "mine.com", "limit": 1000}')
+    await commands.execute(context, ":ranks --limit 100")
+    assert context.asked == []
+
+
+async def test_a_shallower_stored_pull_does_not_cover_a_deeper_request(
+    context: FakeContext,
+) -> None:
+    """The other direction: 100 rows do not answer a request for 1,000."""
+    _stored(context.write, "labs.ranked_keywords", '{"domain": "mine.com", "limit": 100}')
+    await commands.execute(context, ":ranks --limit 1000")
+    assert context.asked == ["ranked keywords · mine.com"]

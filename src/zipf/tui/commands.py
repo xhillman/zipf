@@ -29,6 +29,7 @@ from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
 from zipf.services import budget as budget_service
 from zipf.services import gap as gap_service
+from zipf.services import ranks as ranks_service
 from zipf.services import suggest as suggest_service
 from zipf.services import volume as volume_service
 from zipf.sources.dataforseo import labs
@@ -194,6 +195,44 @@ async def _vol(context: Context, args: list[str]) -> Outcome:
     )
 
 
+async def _ranks(context: Context, args: list[str]) -> Outcome:
+    """What a domain already ranks for, yours by default. Tier 1, paid."""
+    limit, args = take_flag(args, "--limit")
+    force, args = take_switch(args, "--force")
+
+    target = args[0] if args else context.own_domain
+    if not target:
+        raise InvalidRequestError(
+            "No domain to look up.",
+            fix="Pass a domain, as in `:ranks example.com`, or set own_domain in your config.",
+        )
+
+    plan = ranks_service.plan(
+        context.read,
+        target,
+        limit=_positive_int(limit, "--limit", labs.DEFAULT_LIMIT),
+        force=force,
+    )
+    destination = View(views.DOMAIN, plan.domain)
+    if plan.is_fresh:
+        days = plan.age.total_seconds() / 86400 if plan.age else 0.0
+        return Outcome(message=f"already stored, pulled {days:.1f}d ago · $0.00", view=destination)
+
+    approved = await context.confirm(
+        plan.estimate,
+        what=f"ranked keywords · {plan.domain}",
+        detail=f"what {plan.domain} already ranks for",
+    )
+    if not approved:
+        return Outcome(message="cancelled · nothing queued, nothing spent", view=destination)
+
+    job_id = ranks_service.enqueue(context.write, plan)
+    return Outcome(
+        message=f"queued job {job_id} · ~${plan.estimate.usd:.5f} when it runs",
+        changed=True,
+    )
+
+
 async def _gap(context: Context, args: list[str]) -> Outcome:
     """Keywords a competitor ranks for and you do not. Tier 1, paid.
 
@@ -292,6 +331,7 @@ REGISTRY: Final[dict[str, Command]] = {
         Command("cancel", "drop a queued job before it runs", _cancel),
         Command("suggest", "autocomplete suggestions for a seed", _suggest),
         Command("vol", "search volume for keywords", _vol, spends=True),
+        Command("ranks", "what a domain already ranks for", _ranks, spends=True),
         Command("gap", "keywords a competitor ranks for and you do not", _gap, spends=True),
     )
 }

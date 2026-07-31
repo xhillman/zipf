@@ -33,6 +33,7 @@ from zipf.projections.rebuild import rebuild as rebuild_projections
 from zipf.services import budget as budget_service
 from zipf.services import gap as gap_service
 from zipf.services import gsc as gsc_service
+from zipf.services import ranks as ranks_service
 from zipf.services import suggest as suggest_service
 from zipf.services import volume as volume_service
 from zipf.services.cluster import Cluster
@@ -569,6 +570,107 @@ def gap(
         _effect(
             f"{plural(len(clusters), 'distinct query')} from {plural(len(rows), 'row')}",
             f"{plan.competitor} not matched by {plan.mine}",
+            _spend_since(conn, spent_before),
+        )
+
+    _with_db_sync(run)
+
+
+def _print_ranks(clusters: list[Cluster], total_rows: int, domain: str) -> None:
+    if not clusters:
+        console.print(f"[dim]nothing stored for {domain} yet[/]")
+        return
+
+    collapsed = total_rows - len(clusters)
+    title = f"{domain} · {plural(len(clusters), 'distinct query')}"
+    if collapsed:
+        title += f" · {collapsed} restatement(s) collapsed"
+
+    table = Table(title=title)
+    table.add_column("keyword")
+    table.add_column("pos", justify="right")
+    table.add_column("vol", justify="right")
+    table.add_column("also", justify="right", style="dim")
+    table.add_column("url")
+    for cluster in clusters:
+        table.add_row(
+            cluster.keyword,
+            str(cluster.position) if cluster.position is not None else "—",
+            number(cluster.volume),
+            f"+{cluster.variant_count - 1}" if cluster.has_variants else "",
+            (cluster.url or "").removeprefix("https://").removeprefix("http://")[:46],
+        )
+    console.print(table)
+
+
+@app.command()
+def ranks(
+    domain: str = typer.Argument(None, help="Domain to look up. Defaults to config own_domain."),
+    limit: int = typer.Option(
+        100, "--limit", help="Rows to buy. You pay for the depth you ask for."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan and the bill. Spend $0."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
+    wait: bool = typer.Option(False, "--wait", help="Drain the queue before returning."),
+    force: bool = typer.Option(False, "--force", help="Re-buy even if a fresh pull is stored."),
+    cached: bool = typer.Option(
+        False, "--cached", help="Read stored data only. Never prompts, never spends."
+    ),
+) -> None:
+    """What a domain already ranks for. Tier 1, paid.
+
+    Defaults to your own domain, which is the one worth knowing: without it every
+    other view can tell you what a competitor ranks for and nothing about where
+    you stand.
+    """
+    target = domain or load_settings().own_domain
+    if not target:
+        raise ConfigMissingError(
+            setting="own_domain",
+            config_path=str(Paths.resolve().config_file),
+            flag="a domain argument",
+        )
+
+    def run(conn: sqlite3.Connection) -> None:
+        spent_before = _budget().spent_this_month(conn)
+        plan = ranks_service.plan(conn, target, limit=limit, force=force)
+
+        if plan.is_fresh:
+            age_days = (plan.age.total_seconds() / 86400) if plan.age else 0.0
+            console.print(f"[green]cached[/] pulled {age_days:.1f}d ago · nothing to buy · $0.00")
+        elif cached:
+            console.print(
+                f"[dim]--cached: no stored pull for {plan.domain}, "
+                f"skipping the ${plan.estimate.usd:.5f} pull[/]"
+            )
+        elif dry_run:
+            console.print(
+                f"[cyan]dry run[/] would buy up to {plan.limit:,} rows for "
+                f"${plan.estimate.usd:.5f} · spent $0.00"
+            )
+        elif confirm_spend(
+            conn,
+            _budget(),
+            plan.estimate,
+            what=f"ranked keywords · {plan.domain}",
+            detail=f"what {plan.domain} already ranks for",
+            assume_yes=yes,
+        ):
+            job_id = ranks_service.enqueue(conn, plan)
+            console.print(f"[green]queued[/] job {job_id}")
+            if wait:
+                _drain(conn)
+        else:
+            console.print("[yellow]cancelled[/] nothing queued, nothing spent")
+
+        rows = ranks_service.read_rows(conn, plan.domain)
+        clusters = ranks_service.read(conn, plan.domain)
+        _print_ranks(clusters, len(rows), plan.domain)
+
+        ranked = sum(1 for row in rows if row["position"] is not None)
+        _effect(
+            f"{plural(len(clusters), 'distinct query')} from {plural(len(rows), 'row')}",
+            f"{ranked} ranked",
             _spend_since(conn, spent_before),
         )
 
