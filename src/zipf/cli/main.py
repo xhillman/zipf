@@ -788,7 +788,15 @@ def jobs_cancel(
 #: Every table worth counting. Listed rather than derived: `observation` has no
 #: projector until the SERP and LLM milestones, and a stats view that silently
 #: omitted it would be misleading.
-_TABLES = ("raw_response", "keyword", "domain_keyword", "gsc_query", "observation", "job")
+_TABLES = (
+    "raw_response",
+    "keyword",
+    "keyword_month",
+    "domain_keyword",
+    "gsc_query",
+    "observation",
+    "job",
+)
 
 
 @db_app.command("stats")

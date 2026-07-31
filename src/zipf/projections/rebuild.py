@@ -14,13 +14,14 @@ from dataclasses import dataclass, field
 
 from zipf.db.connection import transaction
 from zipf.errors import InvalidRequestError
-from zipf.projections import domain_keyword, gsc_query, keyword
+from zipf.projections import domain_keyword, gsc_query, keyword, keyword_month
 from zipf.projections.base import Projector
 
 PROJECTORS: dict[str, Projector] = {
     keyword.AUTOCOMPLETE.capability: keyword.AUTOCOMPLETE,
     gsc_query.SEARCH_ANALYTICS.capability: gsc_query.SEARCH_ANALYTICS,
     keyword.SEARCH_VOLUME.capability: keyword.SEARCH_VOLUME,
+    keyword_month.KEYWORDS_FOR_KEYWORDS.capability: keyword_month.KEYWORDS_FOR_KEYWORDS,
     domain_keyword.RANKED_KEYWORDS.capability: domain_keyword.RANKED_KEYWORDS,
     domain_keyword.DOMAIN_INTERSECTION.capability: domain_keyword.DOMAIN_INTERSECTION,
 }
