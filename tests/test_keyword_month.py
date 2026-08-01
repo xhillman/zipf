@@ -139,3 +139,61 @@ def test_a_keyword_with_no_history_writes_nothing(db: sqlite3.Connection) -> Non
 
     assert count_rows(db, "keyword_month") == 0
     assert count_rows(db, "keyword") == 1  # the volume still landed
+
+
+def test_a_labs_volume_pull_also_writes_its_history(db: sqlite3.Connection) -> None:
+    """Discovery is no longer the only source of a series.
+
+    ``keyword_overview`` nests twelve months inside ``keyword_info``, paid for in
+    the same call that priced the keyword. Before H1 those months were parsed
+    away and the same history was bought again from the discovery endpoint.
+    """
+    body = json.dumps(
+        {
+            "status_code": 20000,
+            "cost": 0.012,
+            "tasks": [
+                {
+                    "status_code": 20000,
+                    "result": [
+                        {
+                            "items": [
+                                {
+                                    "keyword": "systems thinking",
+                                    "keyword_info": {
+                                        "search_volume": 9900,
+                                        "cpc": 7.39,
+                                        "competition": 0.12,
+                                        "monthly_searches": [
+                                            {
+                                                "year": 2026,
+                                                "month": month,
+                                                "search_volume": 100 * month,
+                                            }
+                                            for month in range(1, 13)
+                                        ],
+                                    },
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ],
+        }
+    ).encode()
+    cursor = db.execute(
+        "INSERT INTO raw_response (capability, params_hash, params_json, body, cost_usd, "
+        "fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "labs.search_volume",
+            "hvol",
+            '{"keywords": ["systems thinking"]}',
+            body,
+            0.012,
+            now_iso(),
+        ),
+    )
+    project(db, int(cursor.lastrowid or 0))
+
+    assert count_rows(db, "keyword_month") == 12
+    assert db.execute("SELECT volume FROM keyword").fetchone()["volume"] == 9900

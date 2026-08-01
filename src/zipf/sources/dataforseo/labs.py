@@ -52,6 +52,34 @@ def _estimate(rows: int) -> PriceEstimate:
     )
 
 
+def parse_keyword_data(block: Mapping[str, Any]) -> dict[str, Any]:
+    """Every keyword fact carried by the shared Labs ``keyword_data`` block.
+
+    Three endpoints return this identical structure: ``keyword_overview`` returns
+    it as the item itself, while ``ranked_keywords`` and ``domain_intersection``
+    nest it under ``keyword_data`` beside their positional fields. Reading it in
+    one place is what makes difficulty, intent and the monthly series arrive with
+    every paid call rather than only from the endpoints that sell them alone.
+
+    ``intent_probability`` is deliberately absent. This block reports
+    ``main_intent`` as a bare label; only the dedicated ``search_intent``
+    endpoint returns a confidence alongside it, so claiming one here would invent
+    a number the vendor did not send.
+    """
+    info = block.get("keyword_info") or {}
+    properties = block.get("keyword_properties") or {}
+    intent = block.get("search_intent_info") or {}
+    return {
+        "keyword": block.get("keyword"),
+        "volume": info.get("search_volume"),
+        "cpc": info.get("cpc"),
+        "competition": info.get("competition"),
+        "difficulty": properties.get("keyword_difficulty"),
+        "intent": intent.get("main_intent"),
+        "monthly": client.monthly_series(info),
+    }
+
+
 # --------------------------------------------------------------------------
 # labs.search_volume — volume, cpc and competition for a batch of keywords
 # --------------------------------------------------------------------------
@@ -86,22 +114,15 @@ def price_search_volume(params: Mapping[str, Any]) -> PriceEstimate:
 def parse_search_volume(body: bytes, params: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Flatten to one dict per keyword.
 
-    Volume lives under ``keyword_info``; the vendor returns a null
-    ``search_volume`` for terms it has no data for, which is a real answer and is
-    preserved rather than coerced to zero.
+    The item *is* the shared keyword-data block for this endpoint, so everything
+    the response carries is read. The vendor returns a null ``search_volume`` for
+    terms it has no data for, which is a real answer and is preserved rather than
+    coerced to zero.
     """
-    rows: list[dict[str, Any]] = []
-    for item in client.items_of(client.task_results(SEARCH_VOLUME, body)):
-        info = item.get("keyword_info") or {}
-        rows.append(
-            {
-                "keyword": item.get("keyword"),
-                "volume": info.get("search_volume"),
-                "cpc": info.get("cpc"),
-                "competition": info.get("competition"),
-            }
-        )
-    return rows
+    return [
+        parse_keyword_data(item)
+        for item in client.items_of(client.task_results(SEARCH_VOLUME, body))
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -127,20 +148,16 @@ def price_ranked_keywords(params: Mapping[str, Any]) -> PriceEstimate:
 
 
 def parse_ranked_keywords(body: bytes, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """One row per ranked keyword: where the domain sits, and what the term is worth."""
     rows: list[dict[str, Any]] = []
     for item in client.items_of(client.task_results(RANKED_KEYWORDS, body)):
-        keyword_data = item.get("keyword_data") or {}
         serp_element = item.get("ranked_serp_element") or {}
         element = serp_element.get("serp_item") or {}
-        info = keyword_data.get("keyword_info") or {}
         rows.append(
             {
-                "keyword": keyword_data.get("keyword"),
+                **parse_keyword_data(item.get("keyword_data") or {}),
                 "position": element.get("rank_absolute"),
                 "url": element.get("url"),
-                "volume": info.get("search_volume"),
-                "cpc": info.get("cpc"),
-                "competition": info.get("competition"),
             }
         )
     return rows
@@ -174,16 +191,11 @@ def parse_domain_intersection(body: bytes, params: Mapping[str, Any]) -> list[di
     """One row per keyword, with each domain's position where it has one."""
     rows: list[dict[str, Any]] = []
     for item in client.items_of(client.task_results(DOMAIN_INTERSECTION, body)):
-        keyword_data = item.get("keyword_data") or {}
-        info = keyword_data.get("keyword_info") or {}
-        first = (item.get("first_domain_serp_element") or {}) or {}
-        second = (item.get("second_domain_serp_element") or {}) or {}
+        first = item.get("first_domain_serp_element") or {}
+        second = item.get("second_domain_serp_element") or {}
         rows.append(
             {
-                "keyword": keyword_data.get("keyword"),
-                "volume": info.get("search_volume"),
-                "cpc": info.get("cpc"),
-                "competition": info.get("competition"),
+                **parse_keyword_data(item.get("keyword_data") or {}),
                 "target1_position": first.get("rank_absolute"),
                 "target1_url": first.get("url"),
                 "target2_position": second.get("rank_absolute"),

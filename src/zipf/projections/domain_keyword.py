@@ -17,7 +17,7 @@ import sqlite3
 from typing import Any
 
 from zipf.projections.base import Projector
-from zipf.projections.keyword import upsert_measured
+from zipf.projections.keyword import upsert_measured, upsert_months
 from zipf.sources.dataforseo import labs
 
 _UPSERT = """
@@ -66,9 +66,11 @@ def apply_ranked_keywords(conn: sqlite3.Connection, row: sqlite3.Row) -> int:
         return 0
 
     written = _write_ranks(conn, row, domain, records)
-    # The response carries volume for each ranked keyword; it is already bought,
-    # so it is projected rather than discarded.
+    # The response carries each ranked keyword's volume, difficulty, intent and
+    # twelve-month series; all of it is already bought, so it is projected rather
+    # than discarded and re-purchased from the endpoints that sell it alone.
     upsert_measured(conn, row, records)
+    upsert_months(conn, row, records)
     return written
 
 
@@ -99,17 +101,18 @@ def apply_domain_intersection(conn: sqlite3.Connection, row: sqlite3.Row) -> int
         )
 
     upsert_measured(conn, row, records)
+    upsert_months(conn, row, records)
     return written
 
 
 RANKED_KEYWORDS = Projector(
     capability=labs.RANKED_KEYWORDS,
-    tables=("domain_keyword", "keyword"),
+    tables=("domain_keyword", "keyword", "keyword_month"),
     apply=apply_ranked_keywords,
 )
 
 DOMAIN_INTERSECTION = Projector(
     capability=labs.DOMAIN_INTERSECTION,
-    tables=("domain_keyword", "keyword"),
+    tables=("domain_keyword", "keyword", "keyword_month"),
     apply=apply_domain_intersection,
 )

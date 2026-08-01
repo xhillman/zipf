@@ -133,3 +133,24 @@ def items_of(results: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         if isinstance(nested, list):
             items.extend(item for item in nested if isinstance(item, dict))
     return items
+
+
+def monthly_series(container: Mapping[str, Any]) -> list[dict[str, int]]:
+    """The twelve-month volume series, oldest first.
+
+    Both API families report ``monthly_searches`` with the same entry shape, and
+    both feed the same ``keyword_month`` table — Google Ads at the top level of a
+    keyword record, Labs inside ``keyword_info``. One normaliser here means the
+    two cannot disagree about what a month row looks like.
+
+    Kept as a list rather than flattened into a single figure: one number cannot
+    say that a seasonal peak is a peak.
+    """
+    series: list[dict[str, int]] = []
+    for entry in container.get("monthly_searches") or []:
+        if not isinstance(entry, dict):
+            continue
+        year, month, volume = entry.get("year"), entry.get("month"), entry.get("search_volume")
+        if isinstance(year, int) and isinstance(month, int):
+            series.append({"year": year, "month": month, "volume": volume or 0})
+    return sorted(series, key=lambda row: (row["year"], row["month"]))

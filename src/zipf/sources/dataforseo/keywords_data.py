@@ -108,22 +108,6 @@ def _competition(item: Mapping[str, Any]) -> float | None:
     return round(index / 100, 4) if isinstance(index, int | float) else None
 
 
-def _monthly(item: Mapping[str, Any]) -> list[dict[str, int]]:
-    """The twelve-month volume series, oldest first.
-
-    Kept as its own list rather than flattened into the keyword row: one number
-    cannot say that a seasonal peak is a peak.
-    """
-    series: list[dict[str, int]] = []
-    for entry in item.get("monthly_searches") or []:
-        if not isinstance(entry, dict):
-            continue
-        year, month, volume = entry.get("year"), entry.get("month"), entry.get("search_volume")
-        if isinstance(year, int) and isinstance(month, int):
-            series.append({"year": year, "month": month, "volume": volume or 0})
-    return sorted(series, key=lambda row: (row["year"], row["month"]))
-
-
 def parse(body: bytes, params: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Flatten the response into one record per keyword.
 
@@ -141,7 +125,7 @@ def parse(body: bytes, params: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "volume": item.get("search_volume"),
                 "cpc": item.get("cpc"),
                 "competition": _competition(item),
-                "monthly": _monthly(item),
+                "monthly": client.monthly_series(item),
             }
         )
     return rows
