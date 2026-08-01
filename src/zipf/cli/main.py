@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from zipf import prune as prune_cache
 from zipf.budget import Budget
 from zipf.cli.paid import confirm_spend
 from zipf.clock import age_of, age_of_delta, elapsed_between
@@ -423,6 +424,51 @@ def db_rebuild(
     _effect(
         f"{plural(len(stats.tables_cleared), 'table')} replayed",
         f"from {plural(stats.rows_replayed, 'stored response')}",
+        "$0.00",
+    )
+
+
+@db_app.command("prune")
+def db_prune(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would go. Removes nothing."),
+) -> None:
+    """Drop free, superseded responses that nothing is derived from. Free.
+
+    Only ever removes rows that cost nothing, that no projection reads, and that
+    are neither the newest answer to their question nor still inside their TTL.
+    Anything paid for is refused by the database itself.
+    """
+    paths = Paths.resolve()
+    with connect(paths.db_file) as conn:
+        planned = prune_cache.preview(conn)
+
+        if planned.is_empty:
+            console.print(
+                "[green]nothing to prune[/] no free response is both stale and superseded"
+            )
+            _effect("nothing removed", "$0.00")
+            return
+
+        table = Table(
+            title=f"{plural(planned.rows, 'response')}, {planned.bytes / 1_048_576:.2f} MB"
+        )
+        table.add_column("capability")
+        table.add_column("rows", justify="right")
+        for name, count in planned.by_capability.items():
+            table.add_row(name, f"{count:,}")
+        console.print(table)
+
+        if dry_run:
+            console.print("[cyan]dry run[/] nothing was removed")
+            _effect(f"{plural(planned.rows, 'response')} would go", "$0.00")
+            return
+
+        prune_cache.prune(conn)
+        reclaimed = prune_cache.reclaim(conn, paths.db_file)
+
+    _effect(
+        f"{plural(planned.rows, 'response')} removed",
+        f"{reclaimed / 1_048_576:.2f} MB reclaimed",
         "$0.00",
     )
 
@@ -913,6 +959,7 @@ def db_stats() -> None:
             "COALESCE(SUM(cost_usd), 0.0) AS paid, MIN(fetched_at) AS oldest "
             "FROM raw_response"
         ).fetchone()
+        prunable = prune_cache.preview(conn)
 
     size_mb = paths.db_file.stat().st_size / 1_048_576
     console.print(f"database  {paths.db_file}  [dim]{size_mb:.2f} MB[/]")
@@ -923,6 +970,13 @@ def db_stats() -> None:
     )
     if summary["oldest"]:
         console.print(f"oldest    {summary['oldest']}  [dim]({age_of(summary['oldest'])} ago)[/]")
+    # Only mentioned when there is something to do about it. A line reading
+    # "0 prunable" every time trains you to stop reading the block.
+    if not prunable.is_empty:
+        console.print(
+            f"prunable  {plural(prunable.rows, 'free response')} "
+            f"[dim]{prunable.bytes / 1_048_576:.2f} MB · `zipf db prune`[/]"
+        )
 
     table = Table(show_header=True)
     table.add_column("table")

@@ -87,6 +87,7 @@ zipf jobs run | list | show <id> | cancel <id>   the work queue
 zipf budget [--cached]                           what you can still spend
 zipf db stats                                    what the database holds
 zipf db rebuild [--capability NAME]              replay projections from stored bytes
+zipf db prune [--dry-run]                        drop free, superseded responses
 ```
 
 **Reading data you already own is always free and never prompts.** `vol` and
