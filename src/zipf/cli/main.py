@@ -9,12 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 
 import typer
-from rich.console import Console
+from rich.console import Console, JustifyMethod
 from rich.panel import Panel
 from rich.table import Table
 
@@ -139,88 +140,128 @@ def _spend_since(conn: sqlite3.Connection, before: float) -> str:
     return f"${delta:.5f}" if delta > 0 else "$0.00"
 
 
-def _print_volumes(clusters: list[Cluster], total_rows: int) -> None:
-    if not clusters:
-        console.print("[dim]nothing stored for these keywords yet[/]")
+@dataclass(frozen=True)
+class Column[T]:
+    """One column of a printed table: a header, and how to read it from a row.
+
+    Declaring columns as data rather than as statements is what lets one printer
+    serve every result table. The five tables differ only in which cells they
+    show; the empty check, the title, and the loop were identical in all of them.
+    """
+
+    header: str
+    cell: Callable[[T], str]
+    justify: JustifyMethod = "left"
+    style: str | None = None
+
+
+def _print_table[T](
+    rows: Sequence[T],
+    columns: Sequence[Column[T]],
+    *,
+    title: str,
+    empty: str | None = None,
+) -> None:
+    """Print one result table.
+
+    ``empty`` replaces the table when there is nothing to show. Passing ``None``
+    prints the headers over no rows instead, which is what the ``--flat`` views
+    do: they were asked for every phrasing, and an empty table answers that
+    honestly where a sentence would read as an error.
+    """
+    if not rows and empty is not None:
+        console.print(f"[dim]{empty}[/]")
         return
 
-    collapsed = total_rows - len(clusters)
-    title = f"{len(clusters)} distinct quer{'y' if len(clusters) == 1 else 'ies'}"
-    if collapsed:
-        title += f" · {collapsed} restatement(s) collapsed"
-
     table = Table(title=title)
-    table.add_column("keyword")
-    table.add_column("volume", justify="right")
-    table.add_column("cpc", justify="right")
-    table.add_column("comp", justify="right")
-    table.add_column("also", justify="right", style="dim")
-    for cluster in clusters:
-        best = cluster.representative
-        table.add_row(
-            cluster.keyword,
-            number(cluster.volume),
-            money(best.get("cpc")),
-            number(best.get("competition"), ".2f"),
-            f"+{cluster.variant_count - 1}" if cluster.has_variants else "",
-        )
-    console.print(table)
-
-
-def _print_volumes_flat(rows: list[dict[str, Any]]) -> None:
-    table = Table(title=f"{len(rows)} keyword(s), every phrasing")
-    table.add_column("keyword")
-    table.add_column("volume", justify="right")
-    table.add_column("cpc", justify="right")
-    table.add_column("comp", justify="right")
+    for column in columns:
+        table.add_column(column.header, justify=column.justify, style=column.style)
     for row in rows:
-        table.add_row(
-            row["keyword"],
-            number(row["volume"]),
-            money(row["cpc"]),
-            number(row["competition"], ".2f"),
-        )
+        table.add_row(*(column.cell(row) for column in columns))
     console.print(table)
 
 
-def _print_gap(clusters: list[Cluster], total_rows: int) -> None:
-    if not clusters:
-        console.print("[dim]no gap rows stored yet; run the job first[/]")
-        return
+def _cluster_title(clusters: Sequence[Cluster], total_rows: int, *, prefix: str = "") -> str:
+    """How many distinct queries these rows really are.
 
+    The collapsed count is the point: a hundred bought rows are often twenty real
+    opportunities, and a reader looking at twenty rows should know the other
+    eighty were restatements rather than something that failed to load.
+    """
+    head = plural(len(clusters), "distinct query")
+    if prefix:
+        head = f"{prefix} · {head}"
     collapsed = total_rows - len(clusters)
-    title = f"{len(clusters)} distinct quer{'y' if len(clusters) == 1 else 'ies'}"
-    if collapsed:
-        title += f" · {collapsed} restatement(s) collapsed"
-
-    table = Table(title=title)
-    table.add_column("keyword")
-    table.add_column("vol", justify="right")
-    table.add_column("pos", justify="right")
-    table.add_column("also", justify="right", style="dim")
-    table.add_column("their url")
-    for cluster in clusters:
-        volume = f"{cluster.volume:,}" if cluster.volume is not None else "[dim]—[/]"
-        also = f"+{cluster.variant_count - 1}" if cluster.has_variants else ""
-        table.add_row(
-            cluster.keyword,
-            volume,
-            str(cluster.position) if cluster.position is not None else "—",
-            also,
-            (cluster.url or "")[:46],
-        )
-    console.print(table)
+    return f"{head} · {collapsed} restatement(s) collapsed" if collapsed else head
 
 
-def _print_gap_flat(rows: list[dict[str, Any]]) -> None:
-    table = Table(title=f"{len(rows)} gap keyword(s), every phrasing")
-    table.add_column("keyword")
-    table.add_column("vol", justify="right")
-    table.add_column("pos", justify="right")
-    for row in rows:
-        volume = f"{row['volume']:,}" if row["volume"] is not None else "[dim]—[/]"
-        table.add_row(row["keyword"], volume, str(row["position"]))
-    console.print(table)
+def _also(cluster: Cluster) -> str:
+    """How many other phrasings of this query folded into the row."""
+    return f"+{cluster.variant_count - 1}" if cluster.has_variants else ""
+
+
+def _position(cluster: Cluster) -> str:
+    return str(cluster.position) if cluster.position is not None else "—"
+
+
+_ALSO: Final[Column[Cluster]] = Column("also", _also, justify="right", style="dim")
+_KEYWORD: Final[Column[Cluster]] = Column("keyword", lambda cluster: cluster.keyword)
+
+VOLUME_COLUMNS: Final[tuple[Column[Cluster], ...]] = (
+    _KEYWORD,
+    Column("volume", lambda cluster: number(cluster.volume), justify="right"),
+    Column("cpc", lambda cluster: money(cluster.representative.get("cpc")), justify="right"),
+    Column(
+        "comp",
+        lambda cluster: number(cluster.representative.get("competition"), ".2f"),
+        justify="right",
+    ),
+    _ALSO,
+)
+
+GAP_COLUMNS: Final[tuple[Column[Cluster], ...]] = (
+    _KEYWORD,
+    Column("vol", lambda cluster: number(cluster.volume), justify="right"),
+    Column("pos", _position, justify="right"),
+    _ALSO,
+    # Their URL is shown whole. Stripping the scheme, as the rank view does,
+    # would suggest it is your page.
+    Column("their url", lambda cluster: (cluster.url or "")[:46]),
+)
+
+RANK_COLUMNS: Final[tuple[Column[Cluster], ...]] = (
+    _KEYWORD,
+    Column("pos", _position, justify="right"),
+    Column("vol", lambda cluster: number(cluster.volume), justify="right"),
+    _ALSO,
+    Column(
+        "url",
+        lambda cluster: (cluster.url or "").removeprefix("https://").removeprefix("http://")[:46],
+    ),
+)
+
+FLAT_VOLUME_COLUMNS: Final[tuple[Column[dict[str, Any]], ...]] = (
+    Column("keyword", lambda row: row["keyword"]),
+    Column("volume", lambda row: number(row["volume"]), justify="right"),
+    Column("cpc", lambda row: money(row["cpc"]), justify="right"),
+    Column("comp", lambda row: number(row["competition"], ".2f"), justify="right"),
+)
+
+FLAT_GAP_COLUMNS: Final[tuple[Column[dict[str, Any]], ...]] = (
+    Column("keyword", lambda row: row["keyword"]),
+    Column("vol", lambda row: number(row["volume"]), justify="right"),
+    Column("pos", lambda row: str(row["position"]), justify="right"),
+)
+
+IDEAS_COLUMNS: Final[tuple[Column[dict[str, Any]], ...]] = (
+    Column("keyword", lambda row: row["keyword"]),
+    Column("vol", lambda row: number(row["volume"]), justify="right"),
+    Column("cpc", lambda row: money(row["cpc"]), justify="right"),
+    Column("comp", lambda row: number(row["competition"], ".2f"), justify="right"),
+    # Filled only where there is a real peak. A column of month names on flat
+    # data would read as a recommendation about when to publish.
+    Column("peak", lambda row: str(row.get("peak", "")), justify="right", style="dim"),
+)
 
 
 @app.callback()
@@ -546,9 +587,15 @@ def vol(
         # more is not a reason to hide what was already paid for.
         rows = volume_service.read_rows(conn, plan.requested)
         if flat:
-            _print_volumes_flat(rows)
+            _print_table(rows, FLAT_VOLUME_COLUMNS, title=f"{len(rows)} keyword(s), every phrasing")
         else:
-            _print_volumes(volume_service.read(conn, plan.requested), len(rows))
+            clusters = volume_service.read(conn, plan.requested)
+            _print_table(
+                clusters,
+                VOLUME_COLUMNS,
+                title=_cluster_title(clusters, len(rows)),
+                empty="nothing stored for these keywords yet",
+            )
 
         measured = sum(1 for row in rows if row["volume"] is not None)
         _effect(
@@ -625,9 +672,16 @@ def gap(
         rows = gap_service.read_rows(conn, plan.competitor, plan.mine)
         clusters = gap_service.read(conn, plan.competitor, plan.mine)
         if flat:
-            _print_gap_flat(rows)
+            _print_table(
+                rows, FLAT_GAP_COLUMNS, title=f"{len(rows)} gap keyword(s), every phrasing"
+            )
         else:
-            _print_gap(clusters, len(rows))
+            _print_table(
+                clusters,
+                GAP_COLUMNS,
+                title=_cluster_title(clusters, len(rows)),
+                empty="no gap rows stored yet; run the job first",
+            )
 
         _effect(
             f"{plural(len(clusters), 'distinct query')} from {plural(len(rows), 'row')}",
@@ -636,62 +690,6 @@ def gap(
         )
 
     _with_db_sync(run)
-
-
-def _print_ranks(clusters: list[Cluster], total_rows: int, domain: str) -> None:
-    if not clusters:
-        console.print(f"[dim]nothing stored for {domain} yet[/]")
-        return
-
-    collapsed = total_rows - len(clusters)
-    title = f"{domain} · {plural(len(clusters), 'distinct query')}"
-    if collapsed:
-        title += f" · {collapsed} restatement(s) collapsed"
-
-    table = Table(title=title)
-    table.add_column("keyword")
-    table.add_column("pos", justify="right")
-    table.add_column("vol", justify="right")
-    table.add_column("also", justify="right", style="dim")
-    table.add_column("url")
-    for cluster in clusters:
-        table.add_row(
-            cluster.keyword,
-            str(cluster.position) if cluster.position is not None else "—",
-            number(cluster.volume),
-            f"+{cluster.variant_count - 1}" if cluster.has_variants else "",
-            (cluster.url or "").removeprefix("https://").removeprefix("http://")[:46],
-        )
-    console.print(table)
-
-
-def _print_ideas(rows: list[dict[str, Any]]) -> None:
-    if not rows:
-        console.print("[dim]nothing stored for these seeds yet; run the job first[/]")
-        return
-
-    seasonal = sum(1 for row in rows if row.get("peak"))
-    title = f"{plural(len(rows), 'keyword')}"
-    if seasonal:
-        title += f" · {seasonal} seasonal"
-
-    table = Table(title=title)
-    table.add_column("keyword")
-    table.add_column("vol", justify="right")
-    table.add_column("cpc", justify="right")
-    table.add_column("comp", justify="right")
-    # Rendered only where there is a real peak. A column of month names on flat
-    # data would read as a recommendation about when to publish.
-    table.add_column("peak", justify="right", style="dim")
-    for row in rows:
-        table.add_row(
-            row["keyword"],
-            number(row["volume"]),
-            money(row["cpc"]),
-            number(row["competition"], ".2f"),
-            row.get("peak", ""),
-        )
-    console.print(table)
 
 
 @app.command()
@@ -758,7 +756,13 @@ def ideas(
             _drain(conn)
 
         rows = ideas_service.read_rows(conn, plan.seeds, limit=limit)
-        _print_ideas(rows)
+        seasonal = sum(1 for row in rows if row.get("peak"))
+        _print_table(
+            rows,
+            IDEAS_COLUMNS,
+            title=plural(len(rows), "keyword") + (f" · {seasonal} seasonal" if seasonal else ""),
+            empty="nothing stored for these seeds yet; run the job first",
+        )
 
         _effect(
             f"{plural(len(rows), 'keyword')} shown",
@@ -831,7 +835,12 @@ def ranks(
 
         rows = ranks_service.read_rows(conn, plan.domain)
         clusters = ranks_service.read(conn, plan.domain)
-        _print_ranks(clusters, len(rows), plan.domain)
+        _print_table(
+            clusters,
+            RANK_COLUMNS,
+            title=_cluster_title(clusters, len(rows), prefix=plan.domain),
+            empty=f"nothing stored for {plan.domain} yet",
+        )
 
         ranked = sum(1 for row in rows if row["position"] is not None)
         _effect(
