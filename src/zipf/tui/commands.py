@@ -23,10 +23,11 @@ from dataclasses import dataclass
 from typing import Final, Literal, Protocol
 
 from zipf.budget import Budget
+from zipf.clock import as_days
 from zipf.errors import InvalidRequestError
 from zipf.format import plural
 from zipf.jobs import queue
-from zipf.pricing import PriceEstimate
+from zipf.pricing import Plan, PriceEstimate
 from zipf.services import budget as budget_service
 from zipf.services import gap as gap_service
 from zipf.services import ideas as ideas_service
@@ -114,6 +115,56 @@ def _require(args: Sequence[str], *, what: str, example: str) -> None:
         raise InvalidRequestError(f"{what} needs something to work on.", fix=f"Try `{example}`.")
 
 
+@dataclass(frozen=True)
+class Purchase:
+    """One priced request, and what the app should do at each branch.
+
+    The mirror of ``cli.paid.Purchase``. Both shells take the same three-way
+    decision — already owned, declined, queued — over the same plans, and both
+    say something different at every branch of it.
+    """
+
+    plan: Plan
+    #: Names the purchase in the confirmation modal's title.
+    what: str
+    #: Reported when the request is already answered by stored data.
+    owned: str
+    #: Queues the work and describes what was queued. Called only after the gate
+    #: has said yes, so a command cannot enqueue by taking the wrong branch, and
+    #: it is the only thing here handed the writable connection.
+    queue_work: Callable[[sqlite3.Connection], str]
+    #: Extra context under the modal's title, where the request needs it.
+    detail: str = ""
+    #: Where to go when the request is already owned.
+    owned_view: View | None = None
+    #: Where to go when the spend is declined. Deliberately a separate field:
+    #: ``:gap`` and ``:ranks`` return you to the domain you asked about, while
+    #: ``:vol`` and ``:ideas`` leave the view alone. That asymmetry looks
+    #: accidental, but changing where a declined command lands is a behaviour
+    #: change and not this refactor's business.
+    declined_view: View | None = None
+
+
+async def buy(context: Context, purchase: Purchase) -> Outcome:
+    """Take the buy-or-not decision for one typed command.
+
+    Nothing here spends. Reading what you already own is never gated, a decline
+    queues nothing, and an approval enqueues for the runner to execute (R5).
+    """
+    if purchase.plan.is_free:
+        return Outcome(message=purchase.owned, view=purchase.owned_view)
+
+    approved = await context.confirm(
+        purchase.plan.estimate, what=purchase.what, detail=purchase.detail
+    )
+    if not approved:
+        return Outcome(
+            message="cancelled · nothing queued, nothing spent", view=purchase.declined_view
+        )
+
+    return Outcome(message=purchase.queue_work(context.write), changed=True)
+
+
 async def _quit(context: Context, args: list[str]) -> Outcome:
     return Outcome(message="closing", exits=True)
 
@@ -173,26 +224,24 @@ async def _vol(context: Context, args: list[str]) -> Outcome:
     _require(args, what="vol", example=':vol "best crm software" "free crm"')
 
     plan = volume_service.plan(context.read, args, force=force)
-    if plan.is_free:
-        return Outcome(
-            message=f"{plural(len(plan.cached), 'keyword')} already fresh · nothing to buy · $0.00",
-            view=View(views.KEYWORDS),
-        )
 
-    approved = await context.confirm(
-        plan.estimate,
-        what=f"search volume · {plural(len(plan.stale), 'keyword')}",
-    )
-    if not approved:
-        return Outcome(message="cancelled · nothing queued, nothing spent")
-
-    job_ids = volume_service.enqueue(context.write, plan)
-    return Outcome(
-        message=(
+    def queue_batches(conn: sqlite3.Connection) -> str:
+        """One job per batch, so a partial failure loses one call, not all of them."""
+        job_ids = volume_service.enqueue(conn, plan)
+        return (
             f"queued {plural(len(job_ids), 'job')} for {plural(len(plan.stale), 'keyword')} "
             f"· ~${plan.estimate.usd:.5f} when it runs"
+        )
+
+    return await buy(
+        context,
+        Purchase(
+            plan=plan,
+            what=f"search volume · {plural(len(plan.stale), 'keyword')}",
+            owned=(f"{plural(len(plan.cached), 'keyword')} already fresh · nothing to buy · $0.00"),
+            owned_view=View(views.KEYWORDS),
+            queue_work=queue_batches,
         ),
-        changed=True,
     )
 
 
@@ -206,28 +255,24 @@ async def _ideas(context: Context, args: list[str]) -> Outcome:
     _require(args, what="ideas", example=':ideas "crm software" "project management"')
 
     plan = ideas_service.plan(context.read, args, force=force)
-    if plan.is_fresh:
-        days = plan.age.total_seconds() / 86400 if plan.age else 0.0
-        return Outcome(
-            message=f"already stored, pulled {days:.1f}d ago · $0.00",
-            view=View(views.KEYWORDS),
+
+    def queue_call(conn: sqlite3.Connection) -> str:
+        return (
+            f"queued job {ideas_service.enqueue(conn, plan)} "
+            f"for {plural(len(plan.seeds), 'seed')} "
+            f"· flat ${plan.estimate.usd:.2f} when it runs"
         )
 
-    approved = await context.confirm(
-        plan.estimate,
-        what=f"keyword ideas · {plural(len(plan.seeds), 'seed')}",
-        detail=", ".join(plan.seeds),
-    )
-    if not approved:
-        return Outcome(message="cancelled · nothing queued, nothing spent")
-
-    job_id = ideas_service.enqueue(context.write, plan)
-    return Outcome(
-        message=(
-            f"queued job {job_id} for {plural(len(plan.seeds), 'seed')} "
-            f"· flat ${plan.estimate.usd:.2f} when it runs"
+    return await buy(
+        context,
+        Purchase(
+            plan=plan,
+            what=f"keyword ideas · {plural(len(plan.seeds), 'seed')}",
+            detail=", ".join(plan.seeds),
+            owned=f"already stored, pulled {as_days(plan.age):.1f}d ago · $0.00",
+            owned_view=View(views.KEYWORDS),
+            queue_work=queue_call,
         ),
-        changed=True,
     )
 
 
@@ -250,22 +295,20 @@ async def _ranks(context: Context, args: list[str]) -> Outcome:
         force=force,
     )
     destination = View(views.DOMAIN, plan.domain)
-    if plan.is_fresh:
-        days = plan.age.total_seconds() / 86400 if plan.age else 0.0
-        return Outcome(message=f"already stored, pulled {days:.1f}d ago · $0.00", view=destination)
-
-    approved = await context.confirm(
-        plan.estimate,
-        what=f"ranked keywords · {plan.domain}",
-        detail=f"what {plan.domain} already ranks for",
-    )
-    if not approved:
-        return Outcome(message="cancelled · nothing queued, nothing spent", view=destination)
-
-    job_id = ranks_service.enqueue(context.write, plan)
-    return Outcome(
-        message=f"queued job {job_id} · ~${plan.estimate.usd:.5f} when it runs",
-        changed=True,
+    return await buy(
+        context,
+        Purchase(
+            plan=plan,
+            what=f"ranked keywords · {plan.domain}",
+            detail=f"what {plan.domain} already ranks for",
+            owned=f"already stored, pulled {as_days(plan.age):.1f}d ago · $0.00",
+            owned_view=destination,
+            declined_view=destination,
+            queue_work=lambda conn: (
+                f"queued job {ranks_service.enqueue(conn, plan)} "
+                f"· ~${plan.estimate.usd:.5f} when it runs"
+            ),
+        ),
     )
 
 
@@ -295,22 +338,20 @@ async def _gap(context: Context, args: list[str]) -> Outcome:
         force=force,
     )
     target = View(views.GAP, f"{plan.competitor}|{plan.mine}")
-    if plan.is_fresh:
-        days = plan.age.total_seconds() / 86400 if plan.age else 0.0
-        return Outcome(message=f"already stored, pulled {days:.1f}d ago · $0.00", view=target)
-
-    approved = await context.confirm(
-        plan.estimate,
-        what=f"keyword gap · {plan.competitor}",
-        detail=f"{plan.competitor} ranks for, {plan.mine} does not",
-    )
-    if not approved:
-        return Outcome(message="cancelled · nothing queued, nothing spent", view=target)
-
-    job_id = gap_service.enqueue(context.write, plan)
-    return Outcome(
-        message=f"queued job {job_id} · ~${plan.estimate.usd:.5f} when it runs",
-        changed=True,
+    return await buy(
+        context,
+        Purchase(
+            plan=plan,
+            what=f"keyword gap · {plan.competitor}",
+            detail=f"{plan.competitor} ranks for, {plan.mine} does not",
+            owned=f"already stored, pulled {as_days(plan.age):.1f}d ago · $0.00",
+            owned_view=target,
+            declined_view=target,
+            queue_work=lambda conn: (
+                f"queued job {gap_service.enqueue(conn, plan)} "
+                f"· ~${plan.estimate.usd:.5f} when it runs"
+            ),
+        ),
     )
 
 

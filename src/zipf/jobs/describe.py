@@ -77,3 +77,22 @@ def job_kind(capability: str) -> str:
         return COMMAND_NAMES[capability]
     _, _, tail = capability.partition(".")
     return tail or capability
+
+
+#: How a job's status reads at a glance.
+#:
+#: One map for both shells. There were two, and they had already drifted: the
+#: TUI knew ``cancelled`` and the CLI did not, so the same job was dim in one
+#: window and white in the other.
+STATUS_STYLES: dict[str, str] = {
+    "done": "green",
+    "failed": "red",
+    "queued": "yellow",
+    "running": "cyan",
+    "cancelled": "dim",
+}
+
+
+def status_style(status: str) -> str:
+    """The colour for a job status. Anything unrecognised stays plain."""
+    return STATUS_STYLES.get(status, "white")

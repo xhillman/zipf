@@ -25,7 +25,7 @@ from rich.text import Text
 from zipf import capabilities
 from zipf.clock import from_iso, now
 from zipf.format import ABSENT, meter, plural
-from zipf.jobs.describe import job_subject
+from zipf.jobs.describe import job_subject, status_style
 from zipf.services import browse
 from zipf.services import gap as gap_service
 from zipf.services.budget import BudgetStatus
@@ -358,16 +358,6 @@ def status_line(state: BudgetStatus, totals: browse.CacheCounts) -> str:
     )
 
 
-#: How a job's status reads at a glance. Matches the CLI's palette so the same
-#: word is never a different colour in the two shells.
-_JOB_STYLES: Final[dict[str, str]] = {
-    "done": "green",
-    "failed": "red",
-    "queued": "yellow",
-    "running": "cyan",
-    "cancelled": "dim",
-}
-
 #: A glyph per status, so the pane is scannable down the left edge without
 #: reading. Truncating the words instead produced "queu", which is not a word.
 _JOB_MARKS: Final[dict[str, str]] = {
@@ -393,7 +383,7 @@ def jobs_markup(rows: Sequence[sqlite3.Row]) -> str:
     for row in rows:
         params = json.loads(row["params_json"])
         status = row["status"]
-        style = _JOB_STYLES.get(status, "white")
+        style = status_style(status)
 
         # An estimate and a charge are different facts, so the tilde stays until
         # the vendor has said what it actually cost.

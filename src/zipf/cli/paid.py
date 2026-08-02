@@ -22,35 +22,16 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 
+from zipf import confirmation
 from zipf.budget import Budget
-from zipf.pricing import PriceEstimate
-from zipf.services.budget import cached_balance
+from zipf.pricing import Plan, PriceEstimate
 
 console = Console()
-
-
-class Plan(Protocol):
-    """What every paid service's plan exposes, whatever else it carries.
-
-    Two members, both of which the four plan types already had before this
-    protocol named them. ``VolumePlan`` also carries batches and a stale list,
-    and the rank plans carry an age; none of that is the purchase decision's
-    business.
-    """
-
-    @property
-    def is_free(self) -> bool:
-        """Whether this request is already answered by data we own."""
-        ...
-
-    @property
-    def estimate(self) -> PriceEstimate: ...
 
 
 @dataclass(frozen=True)
@@ -142,25 +123,22 @@ def confirm_spend(
     if estimate.is_free:
         return True
 
-    remaining = budget.remaining(conn)
     if not budget.needs_confirmation(estimate):
+        remaining = budget.remaining(conn)
         console.print(f"[dim]{what} · ${estimate.usd:.5f} · ${remaining:.2f} left this month[/]")
         return True
 
-    rows = f"~{estimate.rows:,} rows" if estimate.rows is not None else "unknown rows"
+    # Every figure below comes from `confirmation`, so this panel and the TUI's
+    # modal cannot quote different numbers. Only the margins are decided here.
+    bill = confirmation.bill_for(conn, budget, estimate)
     body = (
-        f"  {rows:<22} not cached\n"
-        f"  [bold]${estimate.usd:.4f}[/]{'':<15} tier {estimate.tier}, {estimate.queue} queue\n"
-        f"  remaining this month: ${remaining:.2f}"
+        f"  {bill.rows:<22} not cached\n"
+        f"  [bold]{bill.amount}[/]{'':<15} {bill.terms}\n"
+        f"  remaining this month: {bill.remaining}"
     )
-
-    # The vendor balance is the limit that actually bites. Read from cache: the
-    # gate must stay fast and must still work with no network.
-    balance, _age = cached_balance(conn)
-    if balance is not None:
-        marker = "[red]" if estimate.usd > balance else ""
-        close = "[/]" if marker else ""
-        body += f"\n  vendor balance:       {marker}${balance:.2f}{close}"
+    if bill.balance is not None:
+        marker, close = ("[red]", "[/]") if bill.over_balance else ("", "")
+        body += f"\n  vendor balance:       {marker}{bill.balance}{close}"
     if detail:
         body = f"  {detail}\n{body}"
 

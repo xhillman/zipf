@@ -11,7 +11,6 @@ import json
 import sqlite3
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Annotated, Any, Final
 
 import typer
@@ -22,14 +21,14 @@ from rich.table import Table
 from zipf import prune as prune_cache
 from zipf.budget import Budget
 from zipf.cli import paid
-from zipf.clock import age_of, age_of_delta, elapsed_between
+from zipf.clock import age_of, age_of_delta, as_days, elapsed_between
 from zipf.config import DEFAULT_CONFIG_TOML, Paths, load_settings
 from zipf.db.connection import connect
 from zipf.db.migrate import migrate
 from zipf.errors import ConfigMissingError, ZipfError
 from zipf.format import meter, money, number, plural
 from zipf.jobs import queue as job_queue
-from zipf.jobs.describe import job_depth, job_kind, job_subject
+from zipf.jobs.describe import job_depth, job_kind, job_subject, status_style
 from zipf.jobs.runner import JobRunner
 from zipf.projections.rebuild import count_rows
 from zipf.projections.rebuild import rebuild as rebuild_projections
@@ -58,8 +57,6 @@ app.add_typer(gsc_app)
 app.add_typer(jobs_app)
 
 console = Console()
-
-_JOB_STYLES = {"done": "green", "failed": "red", "queued": "yellow", "running": "cyan"}
 
 
 def _cost_cell(row: sqlite3.Row) -> str:
@@ -118,16 +115,6 @@ def _effect(*parts: str) -> None:
     "$0.00" is information, and its absence is not.
     """
     console.print("[bold]→[/] " + " · ".join(part for part in parts if part))
-
-
-def _age_days(age: timedelta | None) -> float:
-    """How old a stored pull is, in days. Absent reads as brand new.
-
-    A missing age only reaches here when a plan is fresh but carries no
-    timestamp, which no service produces today; 0.0 keeps the readout honest
-    rather than printing a placeholder next to real data.
-    """
-    return age.total_seconds() / 86400 if age else 0.0
 
 
 def _spend_since(conn: sqlite3.Connection, before: float) -> str:
@@ -649,8 +636,7 @@ def gap(
                 what=f"keyword gap · {plan.competitor}",
                 detail=f"{plan.competitor} ranks for, {plan.mine} does not",
                 owned=(
-                    f"[green]cached[/] pulled {_age_days(plan.age):.1f}d ago · "
-                    f"nothing to buy · $0.00"
+                    f"[green]cached[/] pulled {as_days(plan.age):.1f}d ago · nothing to buy · $0.00"
                 ),
                 skipped=(
                     f"[dim]--cached: no stored pull for {plan.competitor}, "
@@ -735,7 +721,7 @@ def ideas(
                 # verbatim while the flow moves; tests/test_cli_paid.py pins it
                 # and says so. Fixing it is its own change.
                 owned=(
-                    f"[green]cached[/] pulled {_age_days(plan.age):.1f}d ago "
+                    f"[green]cached[/] pulled {as_days(plan.age):.1f}d ago "
                     f"from [{', '.join(plan.covered_by or [])}] · $0.00"
                 ),
                 skipped=(
@@ -813,8 +799,7 @@ def ranks(
                 what=f"ranked keywords · {plan.domain}",
                 detail=f"what {plan.domain} already ranks for",
                 owned=(
-                    f"[green]cached[/] pulled {_age_days(plan.age):.1f}d ago · "
-                    f"nothing to buy · $0.00"
+                    f"[green]cached[/] pulled {as_days(plan.age):.1f}d ago · nothing to buy · $0.00"
                 ),
                 skipped=(
                     f"[dim]--cached: no stored pull for {plan.domain}, "
@@ -891,7 +876,7 @@ def jobs_list(limit: int = typer.Option(20, "--limit")) -> None:
             str(row["id"]),
             job_subject(params),
             job_kind(row["capability"]),
-            f"[{_JOB_STYLES.get(row['status'], 'white')}]{row['status']}[/]{retries}",
+            f"[{status_style(row['status'])}]{row['status']}[/]{retries}",
             age_of(row["created_at"]),
             _cost_cell(row),
         )
@@ -921,7 +906,7 @@ def jobs_show(job_id: int = typer.Argument(..., help="Job to inspect.")) -> None
         ("what", job_subject(params)),
         ("depth", job_depth(params)),
         ("capability", row["capability"]),
-        ("status", f"[{_JOB_STYLES.get(row['status'], 'white')}]{row['status']}[/]"),
+        ("status", f"[{status_style(row['status'])}]{row['status']}[/]"),
         ("attempts", str(row["attempts"])),
         ("estimated", f"${estimated:.5f}" if estimated is not None else "—"),
         ("actual", f"${actual:.5f}" if actual is not None else "—"),

@@ -12,8 +12,8 @@ from datetime import timedelta
 import pytest
 
 from zipf.clock import elapsed_between, humanise
-from zipf.jobs import queue
-from zipf.jobs.describe import NOTHING, job_depth, job_kind, job_subject
+from zipf.jobs import describe, queue
+from zipf.jobs.describe import NOTHING, job_depth, job_kind, job_subject, status_style
 
 
 @pytest.mark.parametrize(
@@ -126,3 +126,21 @@ def test_recent_carries_what_the_list_view_needs(db: sqlite3.Connection) -> None
     selected = set(row.keys())
     for column in ("params_json", "created_at", "started_at", "finished_at", "attempts"):
         assert column in selected, f"recent() is missing {column}"
+
+
+def test_every_job_status_has_one_style_for_both_shells() -> None:
+    """One palette, so the same word is never a different colour in the two windows.
+
+    There were two maps and they had drifted: the TUI knew ``cancelled`` and the
+    CLI did not, so a cancelled job was dim in one window and white in the other.
+    Every status the queue can write must resolve, or the shell that meets it
+    first silently invents a colour.
+    """
+    for status in (queue.QUEUED, queue.RUNNING, queue.DONE, queue.FAILED, queue.CANCELLED):
+        assert status in describe.STATUS_STYLES, f"{status} has no style"
+        assert status_style(status) != "white", f"{status} fell through to the default"
+
+
+def test_an_unknown_status_stays_plain() -> None:
+    """A status nobody has styled must not borrow another status's meaning."""
+    assert status_style("something new") == "white"

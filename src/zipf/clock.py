@@ -70,3 +70,13 @@ def elapsed_between(start: str | None, end: str | None) -> str:
 def age_of_delta(delta: timedelta | None) -> str:
     """Compact age from an already-computed delta."""
     return "—" if delta is None else f"{humanise(delta)} old"
+
+
+def as_days(delta: timedelta | None) -> float:
+    """A delta in days, for the readouts that print one decimal place.
+
+    Absent reads as brand new. That only happens when a plan is fresh but
+    carries no timestamp, which no service produces today; 0.0 keeps the readout
+    honest rather than printing a placeholder next to real figures.
+    """
+    return delta.total_seconds() / 86400 if delta else 0.0

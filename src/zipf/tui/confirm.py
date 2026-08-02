@@ -22,9 +22,9 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from zipf import confirmation
 from zipf.budget import Budget
 from zipf.pricing import PriceEstimate
-from zipf.services.budget import cached_balance
 
 
 class ConfirmModal(ModalScreen[bool]):
@@ -58,25 +58,17 @@ class ConfirmModal(ModalScreen[bool]):
             yield Static("[bold]enter[/] pull    [bold]esc[/] cancel", id="confirm-keys")
 
     def _body(self) -> str:
-        estimate = self._estimate
-        rows = f"~{estimate.rows:,} rows" if estimate.rows is not None else "unknown rows"
+        """The bill, laid out for a modal. Every figure comes from ``confirmation``."""
+        bill = confirmation.bill_for(self._conn, self._budget, self._estimate)
         lines = []
         if self._detail:
             lines.append(f"[dim]{self._detail}[/]")
-        lines.append(f"{rows:<22} not cached")
-        lines.append(
-            f"[bold]${estimate.usd:.4f}[/]{'':<14} tier {estimate.tier}, {estimate.queue} queue"
-        )
-        lines.append(f"remaining this month: ${self._budget.remaining(self._conn):.2f}")
-
-        # The vendor balance is the limit that actually bites. Read from cache so
-        # the gate stays instant and still works with no network.
-        balance, _age = cached_balance(self._conn)
-        if balance is not None:
-            short = estimate.usd > balance
-            marker = "[red]" if short else ""
-            close = "[/]" if short else ""
-            lines.append(f"vendor balance:       {marker}${balance:.2f}{close}")
+        lines.append(f"{bill.rows:<22} not cached")
+        lines.append(f"[bold]{bill.amount}[/]{'':<14} {bill.terms}")
+        lines.append(f"remaining this month: {bill.remaining}")
+        if bill.balance is not None:
+            marker, close = ("[red]", "[/]") if bill.over_balance else ("", "")
+            lines.append(f"vendor balance:       {marker}{bill.balance}{close}")
         return "\n".join(lines)
 
     def action_approve(self) -> None:
