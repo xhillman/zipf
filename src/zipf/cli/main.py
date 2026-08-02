@@ -10,6 +10,7 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Callable, Coroutine
+from datetime import timedelta
 from typing import Annotated, Any
 
 import typer
@@ -19,7 +20,7 @@ from rich.table import Table
 
 from zipf import prune as prune_cache
 from zipf.budget import Budget
-from zipf.cli.paid import confirm_spend
+from zipf.cli import paid
 from zipf.clock import age_of, age_of_delta, elapsed_between
 from zipf.config import DEFAULT_CONFIG_TOML, Paths, load_settings
 from zipf.db.connection import connect
@@ -116,6 +117,16 @@ def _effect(*parts: str) -> None:
     "$0.00" is information, and its absence is not.
     """
     console.print("[bold]→[/] " + " · ".join(part for part in parts if part))
+
+
+def _age_days(age: timedelta | None) -> float:
+    """How old a stored pull is, in days. Absent reads as brand new.
+
+    A missing age only reaches here when a plan is fresh but carries no
+    timestamp, which no service produces today; 0.0 keeps the readout honest
+    rather than printing a placeholder next to real data.
+    """
+    return age.total_seconds() / 86400 if age else 0.0
 
 
 def _spend_since(conn: sqlite3.Connection, before: float) -> str:
@@ -502,31 +513,34 @@ def vol(
             f"{len(plan.stale)} to buy in {len(plan.batches)} call(s)[/]"
         )
 
-        if plan.is_free:
-            console.print("[green]all cached[/] nothing to buy")
-        elif cached:
-            console.print(
-                f"[dim]--cached: {len(plan.stale)} keyword(s) not stored, "
-                f"skipping the ${plan.estimate.usd:.5f} pull[/]"
-            )
-        elif dry_run:
-            console.print(
-                f"[cyan]dry run[/] would buy {len(plan.stale)} keyword(s) "
-                f"for ${plan.estimate.usd:.5f} · spent $0.00"
-            )
-        elif confirm_spend(
+        def queue_batches(conn: sqlite3.Connection) -> str:
+            """One job per batch, so a partial failure loses one call, not all of them."""
+            job_ids = volume_service.enqueue(conn, plan)
+            return f"[green]queued[/] job(s) {', '.join(str(i) for i in job_ids)}"
+
+        queued = paid.resolve(
             conn,
             _budget(),
-            plan.estimate,
-            what=f"search volume · {len(plan.stale)} keyword(s)",
-            assume_yes=yes,
-        ):
-            job_ids = volume_service.enqueue(conn, plan)
-            console.print(f"[green]queued[/] job(s) {', '.join(str(i) for i in job_ids)}")
-            if wait:
-                _drain(conn)
-        else:
-            console.print("[yellow]cancelled[/] nothing queued, nothing spent")
+            paid.Purchase(
+                plan=plan,
+                what=f"search volume · {len(plan.stale)} keyword(s)",
+                owned="[green]all cached[/] nothing to buy",
+                skipped=(
+                    f"[dim]--cached: {len(plan.stale)} keyword(s) not stored, "
+                    f"skipping the ${plan.estimate.usd:.5f} pull[/]"
+                ),
+                priced=(
+                    f"[cyan]dry run[/] would buy {len(plan.stale)} keyword(s) "
+                    f"for ${plan.estimate.usd:.5f} · spent $0.00"
+                ),
+                queue_work=queue_batches,
+            ),
+            dry_run=dry_run,
+            cached=cached,
+            yes=yes,
+        )
+        if queued and wait:
+            _drain(conn)
 
         # Always show what is owned, including after a decline. Refusing to buy
         # more is not a reason to hide what was already paid for.
@@ -580,33 +594,33 @@ def gap(
         spent_before = _budget().spent_this_month(conn)
         plan = gap_service.plan(conn, competitor, own, limit=limit, force=force)
 
-        if plan.is_fresh:
-            age_days = (plan.age.total_seconds() / 86400) if plan.age else 0.0
-            console.print(f"[green]cached[/] pulled {age_days:.1f}d ago · nothing to buy · $0.00")
-        elif cached:
-            console.print(
-                f"[dim]--cached: no stored pull for {plan.competitor}, "
-                f"skipping the ${plan.estimate.usd:.5f} pull[/]"
-            )
-        elif dry_run:
-            console.print(
-                f"[cyan]dry run[/] would buy up to {plan.limit:,} rows for "
-                f"${plan.estimate.usd:.5f} · spent $0.00"
-            )
-        elif confirm_spend(
+        queued = paid.resolve(
             conn,
             _budget(),
-            plan.estimate,
-            what=f"keyword gap · {plan.competitor}",
-            detail=f"{plan.competitor} ranks for, {plan.mine} does not",
-            assume_yes=yes,
-        ):
-            job_id = gap_service.enqueue(conn, plan)
-            console.print(f"[green]queued[/] job {job_id}")
-            if wait:
-                _drain(conn)
-        else:
-            console.print("[yellow]cancelled[/] nothing queued, nothing spent")
+            paid.Purchase(
+                plan=plan,
+                what=f"keyword gap · {plan.competitor}",
+                detail=f"{plan.competitor} ranks for, {plan.mine} does not",
+                owned=(
+                    f"[green]cached[/] pulled {_age_days(plan.age):.1f}d ago · "
+                    f"nothing to buy · $0.00"
+                ),
+                skipped=(
+                    f"[dim]--cached: no stored pull for {plan.competitor}, "
+                    f"skipping the ${plan.estimate.usd:.5f} pull[/]"
+                ),
+                priced=(
+                    f"[cyan]dry run[/] would buy up to {plan.limit:,} rows for "
+                    f"${plan.estimate.usd:.5f} · spent $0.00"
+                ),
+                queue_work=lambda conn: f"[green]queued[/] job {gap_service.enqueue(conn, plan)}",
+            ),
+            dry_run=dry_run,
+            cached=cached,
+            yes=yes,
+        )
+        if queued and wait:
+            _drain(conn)
 
         rows = gap_service.read_rows(conn, plan.competitor, plan.mine)
         clusters = gap_service.read(conn, plan.competitor, plan.mine)
@@ -711,34 +725,37 @@ def ideas(
             f"flat ${plan.estimate.usd:.2f}, however many come back[/]"
         )
 
-        if plan.is_fresh:
-            age_days = (plan.age.total_seconds() / 86400) if plan.age else 0.0
-            covered = ", ".join(plan.covered_by or [])
-            console.print(f"[green]cached[/] pulled {age_days:.1f}d ago from [{covered}] · $0.00")
-        elif cached:
-            console.print(
-                f"[dim]--cached: no stored pull covers these seeds, "
-                f"skipping the ${plan.estimate.usd:.2f} call[/]"
-            )
-        elif dry_run:
-            console.print(
-                f"[cyan]dry run[/] would buy up to {keywords_data.MAX_SEEDS * 1000:,} keywords "
-                f"for ${plan.estimate.usd:.2f} · spent $0.00"
-            )
-        elif confirm_spend(
+        queued = paid.resolve(
             conn,
             _budget(),
-            plan.estimate,
-            what=f"keyword ideas · {plural(len(plan.seeds), 'seed')}",
-            detail=", ".join(plan.seeds),
-            assume_yes=yes,
-        ):
-            job_id = ideas_service.enqueue(conn, plan)
-            console.print(f"[green]queued[/] job {job_id}")
-            if wait:
-                _drain(conn)
-        else:
-            console.print("[yellow]cancelled[/] nothing queued, nothing spent")
+            paid.Purchase(
+                plan=plan,
+                what=f"keyword ideas · {plural(len(plan.seeds), 'seed')}",
+                detail=", ".join(plan.seeds),
+                # The seed list is bracketed, and Rich reads `[crm]` as a markup
+                # tag and drops it, so this line names no seeds. Preserved
+                # verbatim while the flow moves; tests/test_cli_paid.py pins it
+                # and says so. Fixing it is its own change.
+                owned=(
+                    f"[green]cached[/] pulled {_age_days(plan.age):.1f}d ago "
+                    f"from [{', '.join(plan.covered_by or [])}] · $0.00"
+                ),
+                skipped=(
+                    f"[dim]--cached: no stored pull covers these seeds, "
+                    f"skipping the ${plan.estimate.usd:.2f} call[/]"
+                ),
+                priced=(
+                    f"[cyan]dry run[/] would buy up to {keywords_data.MAX_SEEDS * 1000:,} keywords "
+                    f"for ${plan.estimate.usd:.2f} · spent $0.00"
+                ),
+                queue_work=lambda conn: f"[green]queued[/] job {ideas_service.enqueue(conn, plan)}",
+            ),
+            dry_run=dry_run,
+            cached=cached,
+            yes=yes,
+        )
+        if queued and wait:
+            _drain(conn)
 
         rows = ideas_service.read_rows(conn, plan.seeds, limit=limit)
         _print_ideas(rows)
@@ -784,33 +801,33 @@ def ranks(
         spent_before = _budget().spent_this_month(conn)
         plan = ranks_service.plan(conn, target, limit=limit, force=force)
 
-        if plan.is_fresh:
-            age_days = (plan.age.total_seconds() / 86400) if plan.age else 0.0
-            console.print(f"[green]cached[/] pulled {age_days:.1f}d ago · nothing to buy · $0.00")
-        elif cached:
-            console.print(
-                f"[dim]--cached: no stored pull for {plan.domain}, "
-                f"skipping the ${plan.estimate.usd:.5f} pull[/]"
-            )
-        elif dry_run:
-            console.print(
-                f"[cyan]dry run[/] would buy up to {plan.limit:,} rows for "
-                f"${plan.estimate.usd:.5f} · spent $0.00"
-            )
-        elif confirm_spend(
+        queued = paid.resolve(
             conn,
             _budget(),
-            plan.estimate,
-            what=f"ranked keywords · {plan.domain}",
-            detail=f"what {plan.domain} already ranks for",
-            assume_yes=yes,
-        ):
-            job_id = ranks_service.enqueue(conn, plan)
-            console.print(f"[green]queued[/] job {job_id}")
-            if wait:
-                _drain(conn)
-        else:
-            console.print("[yellow]cancelled[/] nothing queued, nothing spent")
+            paid.Purchase(
+                plan=plan,
+                what=f"ranked keywords · {plan.domain}",
+                detail=f"what {plan.domain} already ranks for",
+                owned=(
+                    f"[green]cached[/] pulled {_age_days(plan.age):.1f}d ago · "
+                    f"nothing to buy · $0.00"
+                ),
+                skipped=(
+                    f"[dim]--cached: no stored pull for {plan.domain}, "
+                    f"skipping the ${plan.estimate.usd:.5f} pull[/]"
+                ),
+                priced=(
+                    f"[cyan]dry run[/] would buy up to {plan.limit:,} rows for "
+                    f"${plan.estimate.usd:.5f} · spent $0.00"
+                ),
+                queue_work=lambda conn: f"[green]queued[/] job {ranks_service.enqueue(conn, plan)}",
+            ),
+            dry_run=dry_run,
+            cached=cached,
+            yes=yes,
+        )
+        if queued and wait:
+            _drain(conn)
 
         rows = ranks_service.read_rows(conn, plan.domain)
         clusters = ranks_service.read(conn, plan.domain)
