@@ -18,9 +18,10 @@ from statistics import median
 from typing import Any, Final
 
 from zipf import capabilities
-from zipf.clock import from_iso, now, to_iso
+from zipf.clock import from_iso, now
 from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
+from zipf.services import freshness
 from zipf.sources.dataforseo import keywords_data
 
 #: How many stored pulls to examine when looking for one that already covers a
@@ -79,9 +80,12 @@ def _covering_pull(
     back to the seed that produced it, so there is nothing finer to buy.
 
     Candidates are compared in Python because SQLite cannot test one JSON array
-    for being a superset of another; the scan is bounded by ``MAX_CANDIDATES``.
+    for being a superset of another, which is why this is the one freshness check
+    that cannot go through ``freshness.covering_age``. It shares the TTL cutoff
+    with the rest so at least that cannot drift; the scan is bounded by
+    ``MAX_CANDIDATES``.
     """
-    cutoff = to_iso(now() - ttl)
+    cutoff = freshness.stale_before(ttl)
     rows = conn.execute(
         "SELECT id, fetched_at, json_extract(params_json, '$.seeds') AS seeds "
         "FROM raw_response WHERE capability = ? AND fetched_at >= ? "

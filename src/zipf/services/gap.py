@@ -18,10 +18,10 @@ from datetime import timedelta
 from typing import Any
 
 from zipf import capabilities
-from zipf.clock import from_iso, now, to_iso
 from zipf.errors import InvalidRequestError
 from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
+from zipf.services import browse, freshness
 from zipf.services.cluster import Cluster, cluster_rows
 from zipf.sources.dataforseo import labs
 
@@ -55,26 +55,22 @@ def _stored_age(
     pull whose ``limit`` was at least as deep as the one requested. A hash match
     would treat a previous 1,000-row pull as useless to a 100-row request and
     charge for rows already owned.
+
+    ``intersections`` is part of the match because the same endpoint answers two
+    opposite questions: false is "theirs and not yours", true is "both". A stored
+    intersection would otherwise be read as a gap.
     """
-    cutoff = to_iso(now() - ttl)
-    row = conn.execute(
-        "SELECT fetched_at FROM raw_response "
-        "WHERE capability = ? "
-        "AND json_extract(params_json, '$.target1') = ? "
-        "AND json_extract(params_json, '$.target2') = ? "
-        "AND json_extract(params_json, '$.intersections') = 0 "
-        "AND json_extract(params_json, '$.limit') >= ? "
-        "AND fetched_at >= ? "
-        "ORDER BY fetched_at DESC LIMIT 1",
-        (
-            labs.DOMAIN_INTERSECTION,
-            params["target1"],
-            params["target2"],
-            params["limit"],
-            cutoff,
+    return freshness.covering_age(
+        conn,
+        labs.DOMAIN_INTERSECTION,
+        ttl=ttl,
+        where=(
+            freshness.equals("target1", params["target1"]),
+            freshness.equals("target2", params["target2"]),
+            freshness.equals("intersections", 0),
+            freshness.at_least("limit", params["limit"]),
         ),
-    ).fetchone()
-    return now() - from_iso(row["fetched_at"]) if row is not None else None
+    )
 
 
 def plan(
@@ -137,30 +133,20 @@ def enqueue(conn: sqlite3.Connection, gap_plan: GapPlan) -> int:
     )
 
 
-#: Only the newest observation of each keyword. ``domain_keyword`` accumulates a
-#: rank history (R4), so without this a second pull would list every keyword once
-#: per pull rather than once with its current rank.
-_LATEST_ONLY = """
-JOIN (
-  SELECT domain, keyword, MAX(observed_at) AS latest
-  FROM domain_keyword GROUP BY domain, keyword
-) newest
-  ON newest.domain = dk.domain
- AND newest.keyword = dk.keyword
- AND newest.latest = dk.observed_at
-"""
-
-
 def read_rows(conn: sqlite3.Connection, competitor: str, mine: str) -> list[dict[str, Any]]:
     """Every current gap keyword, unclustered, best volume first.
 
     The gap is the *absence* of a row for your domain, which is why this is a
     NOT EXISTS rather than a comparison against a position value.
+
+    The newest-observation join comes from ``browse`` rather than being repeated
+    here. ``ranks.read_rows`` already delegates for the same reason: a second copy
+    of that subquery is a second place for it to drift.
     """
     rows = conn.execute(
         "SELECT dk.keyword, dk.position, dk.url, k.volume, k.cpc, dk.observed_at "
         "FROM domain_keyword dk "
-        f"{_LATEST_ONLY} "
+        f"{browse.LATEST_RANK_JOIN} "
         "LEFT JOIN keyword k ON k.keyword = dk.keyword "
         "WHERE dk.domain = ? "
         "AND NOT EXISTS ("

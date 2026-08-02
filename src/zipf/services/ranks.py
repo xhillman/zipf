@@ -17,11 +17,10 @@ from datetime import timedelta
 from typing import Any
 
 from zipf import capabilities
-from zipf.clock import from_iso, now, to_iso
 from zipf.errors import InvalidRequestError
 from zipf.jobs import queue
 from zipf.pricing import PriceEstimate
-from zipf.services import browse
+from zipf.services import browse, freshness
 from zipf.services.cluster import Cluster, cluster_rows
 from zipf.sources.dataforseo import labs
 
@@ -53,17 +52,15 @@ def _stored_age(
     for. A hash match would treat a previous 1,000-row pull as useless to a
     100-row request and charge again for rows already owned.
     """
-    cutoff = to_iso(now() - ttl)
-    row = conn.execute(
-        "SELECT fetched_at FROM raw_response "
-        "WHERE capability = ? "
-        "AND json_extract(params_json, '$.domain') = ? "
-        "AND json_extract(params_json, '$.limit') >= ? "
-        "AND fetched_at >= ? "
-        "ORDER BY fetched_at DESC LIMIT 1",
-        (labs.RANKED_KEYWORDS, params["domain"], params["limit"], cutoff),
-    ).fetchone()
-    return now() - from_iso(row["fetched_at"]) if row is not None else None
+    return freshness.covering_age(
+        conn,
+        labs.RANKED_KEYWORDS,
+        ttl=ttl,
+        where=(
+            freshness.equals("domain", params["domain"]),
+            freshness.at_least("limit", params["limit"]),
+        ),
+    )
 
 
 def plan(

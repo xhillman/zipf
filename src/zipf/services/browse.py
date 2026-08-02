@@ -48,12 +48,15 @@ DOMAIN_SORTS: Final[dict[str, str]] = {
     "observed": "last_observed DESC, domain",
 }
 
-#: The current rank per domain and keyword. ``domain_keyword`` accumulates a rank
-#: history (R4), so an unfiltered join would return one row per past observation
-#: and multiply every keyword by how often it has been measured.
-_LATEST_RANK = """
-SELECT dk.domain, dk.keyword, dk.position, dk.url, dk.observed_at
-FROM domain_keyword dk
+#: Narrows a query over ``domain_keyword dk`` to each keyword's newest
+#: observation. ``domain_keyword`` accumulates a rank history (R4), so without
+#: this a second pull lists every keyword once per pull rather than once with its
+#: current rank.
+#:
+#: Exported because ``gap`` needs the same restriction over its own SELECT. There
+#: is one copy of this join in the codebase and it lives here, next to the
+#: queries that read the table most.
+LATEST_RANK_JOIN = """
 JOIN (
   SELECT domain, keyword, MAX(observed_at) AS latest
   FROM domain_keyword GROUP BY domain, keyword
@@ -61,6 +64,13 @@ JOIN (
   ON newest.domain = dk.domain
  AND newest.keyword = dk.keyword
  AND newest.latest = dk.observed_at
+"""
+
+#: The current rank per domain and keyword, as a subquery callers select from.
+_LATEST_RANK = f"""
+SELECT dk.domain, dk.keyword, dk.position, dk.url, dk.observed_at
+FROM domain_keyword dk
+{LATEST_RANK_JOIN}
 """
 
 GSC_SORTS: Final[dict[str, str]] = {
