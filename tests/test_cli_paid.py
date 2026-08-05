@@ -255,10 +255,7 @@ CASES = [
     pytest.param(
         ["ideas", "crm"],
         None,
-        # The seed list that covered this pull is missing from the line: main.py
-        # wraps it in square brackets, which Rich parses as a markup tag and
-        # swallows. Pinned as it prints. See the dedicated test below.
-        "cached pulled 0.0d ago from  · $0.00",
+        "cached pulled 0.0d ago from [crm] · $0.00",
         "1 keyword shown · 0 seasonal · $0.00",
         id="ideas-cached",
     ),
@@ -350,23 +347,45 @@ def test_reading_owned_data_never_prompts(
     assert _queued(owned) == []
 
 
-def test_ideas_loses_the_covering_seeds_to_rich_markup(
+def test_ideas_names_the_seeds_that_already_cover_the_request(
     runner: CliRunner, owned: sqlite3.Connection
 ) -> None:
-    """A defect, pinned rather than fixed.
+    """The line exists to say *which* stored pull answers this, so it must say it.
 
-    ``main.py`` builds ``f"...from [{covered}] · $0.00"``. Rich reads ``[crm]``
-    as a markup tag and removes it, so the line that exists to say *which seeds
-    already cover this request* names none of them. Every other command's cached
-    line survives because none of them brackets a value.
-
-    Pinned here so H5 cannot change it silently. Fixing it is a separate change:
-    the bracket needs escaping, or the value belongs outside markup.
+    ``main.py`` renders the seed list through ``rich.markup.escape``. Interpolated
+    directly, Rich reads ``[crm]`` as a markup tag and removes it, and the line
+    silently names no seeds at all — which is how it shipped until this test.
     """
     result = runner.invoke(app, ["ideas", "crm"], input="")
 
-    assert "cached pulled 0.0d ago from  · $0.00" in result.stdout
-    assert "crm" not in result.stdout.split("cached pulled")[1].split("\n")[0]
+    assert "cached pulled 0.0d ago from [crm] · $0.00" in result.stdout
+
+
+def test_a_seed_containing_brackets_survives_the_readout(
+    runner: CliRunner, db: sqlite3.Connection
+) -> None:
+    """Escaping has to hold for the seeds themselves, not only for the delimiters.
+
+    A keyword like ``best crm [free]`` is ordinary. Interpolated into markup it
+    loses the bracketed half, and the readout then reports a stored pull under a
+    name the user never typed.
+    """
+    project(
+        db,
+        _store(
+            db,
+            "keywords_data.keywords_for_keywords",
+            {"seeds": ["best crm [free]"]},
+            _envelope(
+                [{"keyword": "best crm", "search_volume": 10, "cpc": 1.0, "competition_index": 5}],
+                nested=False,
+            ),
+        ),
+    )
+
+    result = runner.invoke(app, ["ideas", "best crm [free]"], input="")
+
+    assert "from [best crm [free]] · $0.00" in result.stdout
 
 
 @pytest.mark.parametrize(

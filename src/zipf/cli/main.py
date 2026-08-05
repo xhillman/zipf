@@ -15,6 +15,7 @@ from typing import Annotated, Any, Final
 
 import typer
 from rich.console import Console, JustifyMethod
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -716,13 +717,14 @@ def ideas(
                 plan=plan,
                 what=f"keyword ideas · {plural(len(plan.seeds), 'seed')}",
                 detail=", ".join(plan.seeds),
-                # The seed list is bracketed, and Rich reads `[crm]` as a markup
-                # tag and drops it, so this line names no seeds. Preserved
-                # verbatim while the flow moves; tests/test_cli_paid.py pins it
-                # and says so. Fixing it is its own change.
+                # The seed list is escaped, not interpolated. Rich reads `[crm]`
+                # as a markup tag and would drop it, which silently emptied the
+                # one line whose job is to say which seeds already cover this
+                # request. Escaping also survives a seed that itself contains
+                # brackets, which no amount of care at the call site would.
                 owned=(
                     f"[green]cached[/] pulled {as_days(plan.age):.1f}d ago "
-                    f"from [{', '.join(plan.covered_by or [])}] · $0.00"
+                    f"from {escape(f'[{", ".join(plan.covered_by or [])}]')} · $0.00"
                 ),
                 skipped=(
                     f"[dim]--cached: no stored pull covers these seeds, "
