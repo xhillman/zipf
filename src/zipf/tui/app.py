@@ -24,6 +24,7 @@ from __future__ import annotations
 import sqlite3
 from typing import ClassVar
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
@@ -61,14 +62,40 @@ class ZipfApp(App[None]):
 
     CSS_PATH = "zipf.tcss"
     TITLE = "zipf"
+    # Every binding is declared, and `_refresh_footer` decides which are worth
+    # showing for the row you are on. Hiding a key outright would make it
+    # undiscoverable; showing all nine at once is a wall nobody reads.
     BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("space", "mark", "mark"),
+        Binding("p", "source", "source"),
+        Binding("s", "sort", "sort"),
+        Binding("d", "density", "sources"),
         Binding("slash", "filter", "filter"),
         Binding("colon", "command", "command"),
-        Binding("s", "sort", "sort"),
-        Binding("r", "reload", "refresh"),
-        Binding("escape", "escape", "back", show=False),
+        Binding("r", "reload", "refresh", show=False),
+        Binding("escape", "escape", "back"),
         Binding("q", "quit", "quit"),
     ]
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Which keys the footer offers for whatever is on screen.
+
+        Marking is meaningless in the ledger and sorting is meaningless in a gap
+        pull already ordered by opportunity, so neither is offered there. This is
+        the contextual footer, done with Textual's own mechanism rather than a
+        hand-drawn line.
+
+        Returning ``None`` hides *and disables* a binding, which is why ``escape``
+        is never gated: it closes whichever bar is open, and a key that stops
+        working once there is nothing to go back to would strand you in the
+        command bar. Everything gated here is something the footer can warn you
+        about before you press it, which beats explaining it afterwards.
+        """
+        if action in {"mark", "source"}:
+            return True if self._spec.key_kind == views.KEYWORD_KEY else None
+        if action == "sort":
+            return True if views.SORT_CYCLES.get(self._view.kind) else None
+        return True
 
     def __init__(
         self,
@@ -94,6 +121,16 @@ class ZipfApp(App[None]):
         self._view = View(views.KEYWORDS)
         self._contains: str | None = None
         self._sort: str | None = None
+        # Marked rows survive a change of view. A mark is a decision about a
+        # keyword, not about the table it happened to be visible in, and losing
+        # it on navigation would make marking useless for gathering a batch.
+        self._marked: set[str] = set()
+        # Whether to show where each figure came from. Off by default: the PRD
+        # asks for silence, and `raw_id` is only interesting once you doubt
+        # something.
+        self._forensic = False
+        # Where `escape` goes back to, for provenance and drilling.
+        self._back: list[View] = []
 
     def compose(self) -> ComposeResult:
         yield Static(id="status")
@@ -102,15 +139,28 @@ class ZipfApp(App[None]):
                 yield Tree("cache", id="sidebar")
                 yield Static(id="jobs")
             with Vertical(id="main"):
+                # Two widgets rather than one line of markup, so the hint's
+                # spend colour comes from the stylesheet that already defines it
+                # rather than from a second copy of the value in Python.
+                with Horizontal(id="head"):
+                    yield Static(id="question")
+                    yield Static(id="hint")
                 yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
                 yield Static(id="detail")
+                yield Static(id="plan")
                 yield Input(placeholder="filter", id="filter")
-                yield Input(placeholder=":command", id="command")
+                # The headline rides on the same row as the thing being typed,
+                # so the price and the command are read together rather than
+                # asking the eye to leave the line it is working on.
+                with Horizontal(id="command-row"):
+                    yield Input(placeholder=":command", id="command")
+                    yield Static(id="verdict")
         yield Footer()
 
     async def on_mount(self) -> None:
         self.query_one("#filter", Input).display = False
-        self.query_one("#command", Input).display = False
+        self.query_one("#command-row", Horizontal).display = False
+        self.query_one("#plan", Static).display = False
         self._build_sidebar()
         self.show_view(View(views.KEYWORDS))
         self._refresh_jobs()
@@ -166,19 +216,30 @@ class ZipfApp(App[None]):
                 data=View(views.GAP, f"{pair['competitor']}|{pair['mine']}"),
             )
 
+        # Two buckets that are questions rather than tables: what has aged out,
+        # and what was paid for. Both read data the cache already holds.
+        stale = len(browse.stale_keywords(self._conn))
+        tree.root.add_leaf(f"stale  {stale}", data=View(views.STALE))
         tree.root.add_leaf(f"gsc  {totals.gsc_queries:,}", data=View(views.GSC))
         tree.root.add_leaf(f"visibility  {totals.observations}", data=View(views.VISIBILITY))
+        tree.root.add_leaf(f"responses  {totals.responses:,}", data=View(views.RESPONSES))
         tree.root.expand()
 
     # ------------------------------------------------------------------ table
 
-    def show_view(self, view: View) -> None:
+    def show_view(self, view: View, *, remember: bool = False) -> None:
         """Switch to a new selection, dropping any filter and sort.
 
         Both are cleared deliberately. A sort key belongs to one view — ordering
         domains by ``volume`` means nothing — and a filter carried into a new
         table produces an empty screen whose cause is off-screen.
+
+        ``remember`` records where you came from, so drilling and following a
+        row's source can be reversed. A sidebar selection does not: the tree is
+        always on screen, so "back" from it would mean nothing.
         """
+        if remember:
+            self._back.append(self._view)
         self._view = view
         self._contains = None
         self._sort = None
@@ -197,41 +258,84 @@ class ZipfApp(App[None]):
             own_domain=self._own_domain,
             contains=self._contains,
             sort=self._sort,
+            marked=frozenset(self._marked),
+            forensic=self._forensic,
         )
-        self._spec = spec
-
         table = self.query_one("#rows", DataTable)
+        # Which row the cursor was on, by identity rather than by position.
+        # Rebuilding clears the table and sends the cursor back to the top, so
+        # without this, marking a row would scroll you away from the row you
+        # just marked — and sorting would lose your place for no reason.
+        previous = (
+            self._spec.keys[table.cursor_row] if table.cursor_row < len(self._spec.keys) else None
+        )
+
+        self._spec = spec
         table.clear(columns=True)
         table.add_columns(*spec.columns)
         for row in spec.rows:
             table.add_row(*row)
 
+        cursor = spec.keys.index(previous) if previous in spec.keys else 0
+        if cursor:
+            table.move_cursor(row=cursor)
+
         self.sub_title = self._caption(spec)
-        self._show_detail(0)
+        self._show_question(spec)
+        self._show_detail(cursor)
+        # The footer offers keys per view, so it has to be re-asked whenever the
+        # view changes rather than only at mount.
+        self.refresh_bindings()
 
     def _caption(self, spec: TableSpec) -> str:
-        """The row count, plus whichever of filter and sort is in force.
+        """The row count, plus whichever of filter, sort and marks is in force.
 
         State the user set must be visible: a filtered table that does not say it
-        is filtered reads as data loss.
+        is filtered reads as data loss, and a mark that is off-screen is a spend
+        waiting to surprise someone.
         """
         parts = [spec.caption]
         if self._contains:
             parts.append(f'matching "{self._contains}"')
         if self._sort:
             parts.append(f"by {self._sort}")
+        # Only where the marks mean something. They survive a change of view, but
+        # reporting "2 marked" over a table with nothing markable in it describes
+        # state the screen cannot show you.
+        if self._marked and spec.key_kind == views.KEYWORD_KEY:
+            parts.append(f"{len(self._marked)} marked")
         return " · ".join(parts)
+
+    def _show_question(self, spec: TableSpec) -> None:
+        """The question this view answers, and the command it makes typeable.
+
+        The hint wears the spend register because every command a view hints at
+        is one that can cost money — it is a price tag, not a tip.
+        """
+        self.query_one("#question", Static).update(
+            f"[bold]{escape(spec.question)}[/]  [dim]{escape(self._caption(spec))}[/]"
+        )
+        self.query_one("#hint", Static).update(escape(spec.hint))
 
     def _show_detail(self, cursor_row: int) -> None:
         """Fill the detail pane for the highlighted row."""
         detail = self.query_one("#detail", Static)
+
+        # A response's own facts belong to the view rather than to a row: the
+        # rows are what it produced, and every one of them has the same source.
+        if self._view.kind == views.RESPONSE and self._view.arg:
+            stored = browse.response_detail(self._conn, int(self._view.arg))
+            if stored is not None:
+                detail.update(views.response_markup(stored))
+                return
+
         if self._spec.is_empty or cursor_row >= len(self._spec.keys):
-            detail.update(f"[dim]{self._spec.caption}[/]")
+            detail.update(f"[dim]{escape(self._spec.caption)}[/]")
             return
 
         key = self._spec.keys[cursor_row]
         if self._spec.key_kind != views.KEYWORD_KEY:
-            detail.update(f"[bold]{key}[/]\n[dim]{self._spec.caption}[/]")
+            detail.update(f"[bold]{escape(key)}[/]\n[dim]{escape(self._spec.caption)}[/]")
             return
 
         detail.update(views.detail_markup(browse.keyword_detail(self._conn, key), key))
@@ -266,15 +370,69 @@ class ZipfApp(App[None]):
         bar.focus()
 
     def action_escape(self) -> None:
-        """Back out of whichever bar is open, or drop the filter."""
-        if self.query_one("#command", Input).display:
+        """Back out of whichever bar is open, drop the filter, or go back.
+
+        In that order, innermost first: escape should undo the most recent thing
+        you did, and closing a bar you just opened is more recent than the
+        navigation that preceded it.
+        """
+        if self.query_one("#command-row", Horizontal).display:
             self._hide_command()
             return
-        if self._contains is None and not self.query_one("#filter", Input).display:
+        if self._contains is not None or self.query_one("#filter", Input).display:
+            self._contains = None
+            self._hide_filter()
+            self._reload_table()
             return
-        self._contains = None
-        self._hide_filter()
+        if self._back:
+            self.show_view(self._back.pop())
+
+    def action_mark(self) -> None:
+        """Mark or unmark the highlighted keyword.
+
+        Marks are what a bare ``:vol`` reads. This is the whole of the selection
+        model: the cursor is the selection, and a command with no arguments takes
+        what is marked rather than inventing a selection language.
+        """
+        key = self._cursor_key()
+        if key is None or self._spec.key_kind != views.KEYWORD_KEY:
+            self.notify("only keyword rows can be marked", severity="information")
+            return
+        if key in self._marked:
+            self._marked.discard(key)
+        else:
+            self._marked.add(key)
         self._reload_table()
+
+    def action_source(self) -> None:
+        """Open the response that produced the highlighted row.
+
+        The ``raw_id`` edge walked backwards. It is on the row in the schema and
+        nothing else in the interface follows it, which is why a keyword can show
+        a volume without being able to say where the volume came from.
+        """
+        table = self.query_one("#rows", DataTable)
+        raw_id = self._spec.source_of(table.cursor_row)
+        if raw_id is None:
+            self.notify("no stored response behind this row", severity="information")
+            return
+        self.show_view(View(views.RESPONSE, str(raw_id)), remember=True)
+
+    def action_density(self) -> None:
+        """Show or hide where each figure came from.
+
+        Two levels rather than three. The middle one in most designs is the
+        default with a label attached, and naming it invites picking it.
+        """
+        self._forensic = not self._forensic
+        self._reload_table()
+        self.notify("showing sources" if self._forensic else "sources hidden")
+
+    def _cursor_key(self) -> str | None:
+        cursor = self.query_one("#rows", DataTable).cursor_row
+        if cursor >= len(self._spec.keys):
+            return None
+        return self._spec.keys[cursor]
 
     def _hide_filter(self) -> None:
         """Put the filter bar away and empty it.
@@ -305,10 +463,12 @@ class ZipfApp(App[None]):
         """Open the command bar.
 
         Spending is typed, never clicked (PRD §9.1). This bar is the only route
-        to a paid action in the whole interface.
+        to a paid action in the whole interface — which is exactly why it shows
+        the bill while you type rather than only once you have committed.
         """
+        self.query_one("#command-row", Horizontal).display = True
         bar = self.query_one("#command", Input)
-        bar.display = True
+        self._show_plan(bar.value)
         bar.focus()
 
     async def action_reload(self) -> None:
@@ -360,7 +520,7 @@ class ZipfApp(App[None]):
         if target is None:
             self.notify("nothing deeper to open for this row", severity="information")
             return
-        self.show_view(target)
+        self.show_view(target, remember=True)
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         """Clicking a column header sorts by it, where that column is sortable."""
@@ -373,19 +533,51 @@ class ZipfApp(App[None]):
         self._reload_table()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Filter as you type.
+        """Filter as you type, and price as you type.
 
         Every browse query is bounded and sub-millisecond, so re-querying per
         keystroke costs less than debouncing would. A hidden bar is being cleared
-        programmatically and its event is not a filter the user asked for.
+        programmatically and its event is not input the user gave.
 
-        Commands are deliberately not run as you type. A half-typed ``:gap a.com``
-        must not price anything.
+        Commands are still not *run* as you type — but they are priced, which is
+        a different thing and a free one. Every ``plan`` in ``services/`` is a
+        pure read against the cache, so a half-typed ``:gap a.com`` can be
+        described in full without anything being fetched or queued.
         """
-        if event.input.id != "filter" or not event.input.display:
+        if event.input.id == "command":
+            # The bar itself is always visible; its row is what gets hidden, so
+            # that is what says whether this event is input the user gave.
+            if self.query_one("#command-row", Horizontal).display:
+                self._show_plan(event.value)
             return
-        self._contains = event.value or None
-        self._reload_table()
+        if event.input.id == "filter" and event.input.display:
+            self._contains = event.value or None
+            self._reload_table()
+
+    def _show_plan(self, text: str) -> None:
+        """Render what the typed command would do, without doing any of it.
+
+        The register decides the colour, and only ``spend`` gets the reserved
+        one. That is what makes the bar readable before it is read: a command
+        that would cost money looks different from one that would not, while it
+        is still being typed.
+        """
+        result = commands.preview(self, text)
+        plan = self.query_one("#plan", Static)
+        verdict = self.query_one("#verdict", Static)
+
+        # User text reaches both of these — a keyword may contain brackets — so
+        # everything derived from input is escaped before it becomes markup.
+        # The register is a class, so the colour it resolves to stays in the
+        # stylesheet next to the rule reserving it.
+        verdict.classes = f"-{result.register}"
+        verdict.update(escape(result.headline))
+
+        plan.classes = f"-{result.register}"
+        plan.update(
+            "\n".join(f"[dim]{label:<14}[/]{escape(value)}" for label, value in result.lines)
+        )
+        plan.display = bool(result.lines)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter applies the filter, or runs the command."""
@@ -400,9 +592,16 @@ class ZipfApp(App[None]):
         self.query_one("#rows", DataTable).focus()
 
     def _hide_command(self) -> None:
+        """Put the command bar away, and the plan with it.
+
+        Hidden before cleared, for the same reason the filter bar is: assigning
+        ``value`` posts a ``Changed`` that would otherwise re-render the plan as
+        an idle prompt on the way out.
+        """
+        self.query_one("#command-row", Horizontal).display = False
         bar = self.query_one("#command", Input)
-        bar.display = False
         bar.value = ""
+        self.query_one("#plan", Static).display = False
         self.query_one("#rows", DataTable).focus()
 
     # --------------------------------------------------------------- commands
@@ -421,6 +620,8 @@ class ZipfApp(App[None]):
             self.notify(exc.fix or exc.problem, title=exc.problem, severity="warning")
             return
 
+        if outcome.clears_marks:
+            self._marked.clear()
         if outcome.view is not None:
             self.show_view(outcome.view)
         if outcome.changed:
@@ -454,6 +655,11 @@ class ZipfApp(App[None]):
     @property
     def own_domain(self) -> str | None:
         return self._own_domain
+
+    @property
+    def marked(self) -> frozenset[str]:
+        """Rows the user has marked, which a command with no arguments reads."""
+        return frozenset(self._marked)
 
     async def confirm(self, estimate: PriceEstimate, *, what: str, detail: str = "") -> bool:
         """Show the bill and wait for a keypress, when the amount warrants asking.

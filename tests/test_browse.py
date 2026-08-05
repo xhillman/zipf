@@ -9,6 +9,7 @@ fetch would couple every assertion to a vendor fixture.
 from __future__ import annotations
 
 import sqlite3
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -201,3 +202,89 @@ def test_keyword_detail_gathers_every_surface(seeded: sqlite3.Connection) -> Non
 
 def test_keyword_detail_absent_is_none(seeded: sqlite3.Connection) -> None:
     assert browse.keyword_detail(seeded, "nothing here") is None
+
+
+# ---------------------------------------------------------------------------
+# Provenance and the refresh planner
+# ---------------------------------------------------------------------------
+
+
+def _measured(conn: sqlite3.Connection, keyword: str, *, capability: str, fetched_at: str) -> int:
+    """A keyword whose volume came from a real measurement, with the edge intact."""
+    raw_id = _response(conn, capability, '{"keywords": ["x"]}', fetched_at)
+    conn.execute(
+        "INSERT INTO keyword (keyword, volume, updated_at, raw_id) VALUES (?, ?, ?, ?)",
+        (keyword, 100, fetched_at, raw_id),
+    )
+    return raw_id
+
+
+def test_stale_lists_only_measurements_that_aged_out(db: sqlite3.Connection) -> None:
+    from zipf.clock import now, to_iso
+    from zipf.sources.dataforseo import labs
+
+    fresh = to_iso(now() - timedelta(days=2))
+    aged = to_iso(now() - timedelta(days=45))
+    _measured(db, "recent", capability=labs.SEARCH_VOLUME, fetched_at=fresh)
+    _measured(db, "ancient", capability=labs.SEARCH_VOLUME, fetched_at=aged)
+
+    assert [row["keyword"] for row in browse.stale_keywords(db)] == ["ancient"]
+
+
+def test_a_keyword_never_measured_is_not_a_refresh_candidate(db: sqlite3.Connection) -> None:
+    """Autocomplete discovers; it does not measure.
+
+    Folding never-measured keywords into the planner would quote a batch price
+    for work the planner is not proposing — buying data you do not have, rather
+    than refreshing data you do.
+    """
+    from zipf.clock import now, to_iso
+    from zipf.sources import autocomplete
+
+    aged = to_iso(now() - timedelta(days=45))
+    _measured(db, "only suggested", capability=autocomplete.CAPABILITY, fetched_at=aged)
+
+    assert browse.stale_keywords(db) == []
+
+
+def test_the_ledger_reports_size_without_reading_the_body(db: sqlite3.Connection) -> None:
+    db.execute(
+        "INSERT INTO raw_response (capability, params_hash, params_json, body, "
+        "cost_usd, fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("labs.search_volume", "h1", "{}", b"x" * 4096, 0.012, "2026-07-01T00:00:00Z"),
+    )
+    row = browse.responses(db)[0]
+    assert row["bytes"] == 4096
+    assert "body" not in row
+
+
+def test_a_response_names_every_row_it_produced(db: sqlite3.Connection) -> None:
+    raw_id = _response(db, "labs.domain_intersection", "{}", "2026-07-01T00:00:00Z")
+    db.execute(
+        "INSERT INTO keyword (keyword, volume, updated_at, raw_id) VALUES (?, ?, ?, ?)",
+        ("from that pull", 10, "2026-07-01T00:00:00Z", raw_id),
+    )
+    db.execute(
+        "INSERT INTO domain_keyword (domain, keyword, position, url, observed_at, raw_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("a.com", "from that pull", 3, "https://a.com/x", "2026-07-01T00:00:00Z", raw_id),
+    )
+
+    detail = browse.response_detail(db, raw_id)
+    assert detail is not None
+    assert detail["projects"] == [
+        {"table": "keyword", "rows": 1},
+        {"table": "domain_keyword", "rows": 1},
+    ]
+
+
+def test_a_table_a_response_never_wrote_to_is_omitted(db: sqlite3.Connection) -> None:
+    """Zero rows is absence, not a row saying zero."""
+    raw_id = _response(db, "dataforseo.user_data", "{}", "2026-07-01T00:00:00Z")
+    detail = browse.response_detail(db, raw_id)
+    assert detail is not None
+    assert detail["projects"] == []
+
+
+def test_an_unknown_response_is_none_rather_than_an_error(db: sqlite3.Connection) -> None:
+    assert browse.response_detail(db, 9999) is None

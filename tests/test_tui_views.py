@@ -74,7 +74,8 @@ def test_stored_text_is_never_parsed_as_markup(db: sqlite3.Connection) -> None:
     spec = views.table_for(db, View(views.KEYWORDS))
     cell = spec.rows[0][0]
     assert isinstance(cell, Text)
-    assert str(cell) == "best crm [free]"
+    # The leading gutter is the mark column; the keyword itself is untouched.
+    assert str(cell).lstrip() == "best crm [free]"
 
 
 def test_domain_view_keys_are_not_keywords(seeded: sqlite3.Connection) -> None:
@@ -221,4 +222,201 @@ def test_filtering_a_gap_matches_collapsed_variants(db: sqlite3.Connection) -> N
 
     filtered = views.table_for(db, View(views.GAP, "them.com|mine.com"), contains="software best")
     assert len(filtered.rows) == 1
-    assert str(filtered.rows[0][0]) == "best crm software"  # the representative, not the variant
+    # The representative, not the variant. Leading gutter is the mark column.
+    assert str(filtered.rows[0][0]).lstrip() == "best crm software"
+
+
+# ---------------------------------------------------------------------------
+# Questions, sort marks, marks and density
+# ---------------------------------------------------------------------------
+
+
+def test_every_view_states_the_question_it_answers(seeded: sqlite3.Connection) -> None:
+    """A bucket name says which table you are in, which you already know."""
+    for kind in (views.KEYWORDS, views.DOMAINS, views.GAPS, views.STALE, views.RESPONSES):
+        assert views.table_for(seeded, View(kind)).question.endswith("?")
+
+
+def test_the_sorted_column_is_marked_in_its_header(seeded: sqlite3.Connection) -> None:
+    """`dev/notes.md` asks for a sorted-by indicator; it goes on the column."""
+    unsorted = views.table_for(seeded, View(views.KEYWORDS))
+    assert unsorted.columns == ("keyword", "vol", "age", "aio", "pos")
+
+    by_volume = views.table_for(seeded, View(views.KEYWORDS), sort="volume")
+    assert by_volume.columns == ("keyword", "vol" + views.SORT_MARK, "age", "aio", "pos")
+
+
+def test_a_marked_column_still_resolves_to_its_sort_key() -> None:
+    """Otherwise sorting by a column once would make that column inert."""
+    assert views.sort_for_column(views.KEYWORDS, "vol" + views.SORT_MARK) == "volume"
+
+
+def test_marking_shows_a_glyph_without_reflowing_the_table(
+    seeded: sqlite3.Connection,
+) -> None:
+    """The gutter is reserved whether or not anything is marked.
+
+    Without that, marking a row would shift every column beside it by two
+    characters, which is a redraw of the whole table for one keypress.
+    """
+    spec = views.table_for(seeded, View(views.KEYWORDS), marked=frozenset({"stale keyword"}))
+    cells = {str(spec.keys[i]): row[0] for i, row in enumerate(spec.rows)}
+
+    assert str(cells["stale keyword"]) == f"{views.MARK} stale keyword"
+    assert str(cells["fresh keyword"]) == "  fresh keyword"
+    assert len(str(cells["stale keyword"])) - len("stale keyword") == 2
+    assert len(str(cells["fresh keyword"])) - len("fresh keyword") == 2
+
+
+def test_sources_are_hidden_until_asked_for(seeded: sqlite3.Connection) -> None:
+    """Default to silence: raw_id is only interesting once you doubt something."""
+    quiet = views.table_for(seeded, View(views.KEYWORDS))
+    loud = views.table_for(seeded, View(views.KEYWORDS), forensic=True)
+    assert "src" not in quiet.columns
+    assert loud.columns[-2:] == ("src", "fetched")
+    assert len(loud.rows[0]) == len(quiet.rows[0]) + 2
+
+
+# ---------------------------------------------------------------------------
+# The refresh planner
+# ---------------------------------------------------------------------------
+
+
+def test_the_planner_names_the_command_that_acts_on_it(db: sqlite3.Connection) -> None:
+    """It is a view, not a control: the only way to act on it is to type."""
+    from zipf.sources.dataforseo import labs
+
+    aged = to_iso(now() - timedelta(days=45))
+    raw = db.execute(
+        "INSERT INTO raw_response (capability, params_hash, params_json, body, cost_usd, "
+        "fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (labs.SEARCH_VOLUME, "h", "{}", b"{}", 0.0, aged),
+    ).lastrowid
+    db.execute(
+        "INSERT INTO keyword (keyword, volume, updated_at, raw_id) VALUES (?, ?, ?, ?)",
+        ("aged out", 8100, aged, raw),
+    )
+
+    spec = views.table_for(db, View(views.STALE))
+    assert ":vol --stale" in spec.hint
+    assert "$0.01212" in spec.hint  # 0.012 base + one row
+    assert "1 keyword" in spec.caption
+
+
+def test_an_empty_planner_offers_no_command(db: sqlite3.Connection) -> None:
+    """Nothing to buy is not an opportunity to sell something."""
+    spec = views.table_for(db, View(views.STALE))
+    assert spec.hint == ""
+    assert "inside its" in spec.caption
+
+
+# ---------------------------------------------------------------------------
+# Provenance
+# ---------------------------------------------------------------------------
+
+
+def test_keyword_rows_carry_the_response_that_produced_them(db: sqlite3.Connection) -> None:
+    raw = db.execute(
+        "INSERT INTO raw_response (capability, params_hash, params_json, body, cost_usd, "
+        "fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("labs.search_volume", "h", "{}", b"{}", 0.012, to_iso(now())),
+    ).lastrowid
+    db.execute(
+        "INSERT INTO keyword (keyword, volume, updated_at, raw_id) VALUES (?, ?, ?, ?)",
+        ("tracked", 100, to_iso(now()), raw),
+    )
+    spec = views.table_for(db, View(views.KEYWORDS))
+    assert spec.source_of(0) == raw
+
+
+def test_a_row_with_no_single_source_offers_none(seeded: sqlite3.Connection) -> None:
+    """A gap cluster collapses several rows; guessing one source would be wrong."""
+    spec = views.table_for(seeded, View(views.DOMAINS))
+    assert spec.source_of(0) is None
+
+
+def test_following_a_response_reaches_the_rows_it_wrote() -> None:
+    assert views.drill_target(View(views.RESPONSES), "52") == View(views.RESPONSE, "52")
+    assert views.drill_target(View(views.RESPONSE), "keyword") == View(views.KEYWORDS)
+    assert views.drill_target(View(views.RESPONSE), "not_a_table") is None
+
+
+def test_an_unknown_response_id_renders_a_view_rather_than_raising(
+    db: sqlite3.Connection,
+) -> None:
+    """Reached by keypress from a row, so it must not crash mid-render."""
+    assert views.table_for(db, View(views.RESPONSE, "9999")).is_empty
+    assert views.table_for(db, View(views.RESPONSE, "not-a-number")).is_empty
+
+
+# ---------------------------------------------------------------------------
+# The detail pane, matching the mockup
+# ---------------------------------------------------------------------------
+
+
+def _priced(conn: sqlite3.Connection, keyword: str) -> int:
+    raw_id = conn.execute(
+        "INSERT INTO raw_response (capability, params_hash, params_json, body, cost_usd, "
+        "fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("labs.search_volume", "h-d", "{}", b"{}", 0.01212, to_iso(now())),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO keyword (keyword, volume, cpc, updated_at, raw_id, difficulty, intent, "
+        "intent_probability) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (keyword, 8100, 22.4, to_iso(now()), raw_id, 68, "commercial", 0.97),
+    )
+    for index in range(12):
+        conn.execute(
+            "INSERT INTO keyword_month (keyword, year, month, volume, raw_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (keyword, 2026, index + 1, 1000 * (index + 1), raw_id),
+        )
+    return int(raw_id)
+
+
+def test_detail_shows_difficulty_and_intent(db: sqlite3.Connection) -> None:
+    """Volume and cpc describe an advertising market; difficulty is the only
+    organic figure stored, and reading the first two without it is how a keyword
+    looks worth writing about right up until you see the 68."""
+    from zipf.services import browse
+
+    _priced(db, "best crm software")
+    markup = views.detail_markup(browse.keyword_detail(db, "best crm software"), "x")
+    assert "difficulty 68" in markup
+    assert "commercial" in markup
+    assert "97%" in markup  # the confidence behind the label
+
+
+def test_detail_draws_the_monthly_series(db: sqlite3.Connection) -> None:
+    from zipf.services import browse
+
+    _priced(db, "best crm software")
+    markup = views.detail_markup(browse.keyword_detail(db, "best crm software"), "x")
+    assert "12mo" in markup
+    assert "1,000 to 12,000" in markup
+
+
+def test_detail_names_what_the_source_cost(db: sqlite3.Connection) -> None:
+    from zipf.services import browse
+
+    raw_id = _priced(db, "best crm software")
+    markup = views.detail_markup(browse.keyword_detail(db, "best crm software"), "x")
+    assert f"from #{raw_id}" in markup
+    assert "labs.search_volume" in markup
+    assert "$0.01212" in markup
+
+
+def test_a_flat_series_renders_flat() -> None:
+    """Scaled against its own maximum: the question is when in the year, not how big."""
+    assert len(set(views.sparkline([500] * 12))) == 1
+
+
+def test_a_seasonal_series_peaks_where_the_data_does() -> None:
+    series = [10, 10, 10, 10, 10, 10, 10, 10, 10, 900, 10, 10]
+    drawn = views.sparkline(series)
+    assert drawn[9] == "█"
+    assert drawn.count("█") == 1
+
+
+def test_an_absent_series_draws_nothing(db: sqlite3.Connection) -> None:
+    assert views.sparkline([]) == ""

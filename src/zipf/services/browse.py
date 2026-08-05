@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from zipf.errors import InvalidRequestError
+from zipf.services import freshness, volume
 from zipf.sources.dataforseo import labs
 
 #: Default page size. Comfortably more than fits on a screen, so scrolling works
@@ -79,6 +80,23 @@ GSC_SORTS: Final[dict[str, str]] = {
     "query": "query",
     "position": "position, query",
 }
+
+RESPONSE_SORTS: Final[dict[str, str]] = {
+    "fetched": "fetched_at DESC, id DESC",
+    "cost": "cost_usd DESC, fetched_at DESC",
+    "bytes": "bytes DESC, fetched_at DESC",
+}
+
+#: Every table that carries a ``raw_id``, which is every projection. Listed here
+#: because "what did this response produce" has to ask each of them, and a table
+#: missing from this list would silently look like it was never written to.
+PROJECTED_TABLES: Final[tuple[str, ...]] = (
+    "keyword",
+    "keyword_month",
+    "domain_keyword",
+    "gsc_query",
+    "observation",
+)
 
 
 @dataclass(frozen=True)
@@ -188,7 +206,7 @@ def keywords(
     rows = conn.execute(
         f"""
         SELECT k.keyword, k.volume, k.cpc, k.competition, k.has_aio, k.updated_at,
-               own.position
+               k.raw_id, own.position
         FROM keyword k
         LEFT JOIN ({_LATEST_RANK}) own
           ON own.keyword = k.keyword AND own.domain = ?
@@ -349,6 +367,122 @@ def gsc_queries(
     return [dict(row) for row in rows]
 
 
+def stale_keywords(
+    conn: sqlite3.Connection,
+    *,
+    contains: str | None = None,
+    limit: int = DEFAULT_LIMIT,
+) -> list[dict[str, Any]]:
+    """Keywords that were measured once and whose measurement has aged out.
+
+    Deliberately *not* every keyword lacking a fresh volume. A keyword
+    autocomplete merely suggested has never been measured at all, which is a
+    different question — "buy data I do not have" rather than "refresh data I
+    do" — and folding the two together would quote a batch price for work the
+    planner is not proposing.
+
+    The join to ``raw_response`` is what draws that line, and it is the same join
+    ``volume.fresh_keywords`` uses to draw it from the other side.
+    """
+    cutoff = freshness.stale_before(volume.VOLUME_TTL)
+    capability_slots = ",".join("?" for _ in volume.MEASURING_CAPABILITIES)
+    params: list[Any] = [*volume.MEASURING_CAPABILITIES, cutoff]
+    where = ""
+    if contains:
+        where = "AND k.keyword LIKE ? ESCAPE '\\'"
+        params.append(_contains(contains))
+    params.append(_bounded(limit))
+
+    rows = conn.execute(
+        f"""
+        SELECT k.keyword, k.volume, k.cpc, k.updated_at, k.raw_id,
+               r.capability, r.fetched_at AS measured_at
+        FROM keyword k
+        JOIN raw_response r ON r.id = k.raw_id
+        WHERE r.capability IN ({capability_slots})
+          AND k.updated_at < ?
+          {where}
+        ORDER BY CASE WHEN k.volume IS NULL THEN 1 ELSE 0 END, k.volume DESC, k.keyword
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def responses(
+    conn: sqlite3.Connection,
+    *,
+    contains: str | None = None,
+    sort: str | None = None,
+    limit: int = DEFAULT_LIMIT,
+) -> list[dict[str, Any]]:
+    """The acquisition ledger: what was bought, when, and for how much.
+
+    ``body`` is measured rather than selected. It is the whole vendor response
+    and can run to megabytes; reading fifty of them to render a size column would
+    make opening this view cost more than every other browse query combined.
+    """
+    order = _order_by(RESPONSE_SORTS, sort)
+    params: list[Any] = []
+    where = ""
+    if contains:
+        where = "WHERE capability LIKE ? ESCAPE '\\' OR params_json LIKE ? ESCAPE '\\'"
+        params += [_contains(contains), _contains(contains)]
+    params.append(_bounded(limit))
+
+    rows = conn.execute(
+        f"""
+        SELECT id, capability, params_json, params_hash, cost_usd, fetched_at,
+               LENGTH(body) AS bytes
+        FROM raw_response
+        {where}
+        ORDER BY {order}
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def response_detail(conn: sqlite3.Connection, response_id: int) -> dict[str, Any] | None:
+    """One stored response, and every row downstream of it.
+
+    This is the ``raw_id`` edge walked forwards. It is the claim the whole tool
+    rests on — bought once, owned forever, and rebuildable — so the counts come
+    from the projections themselves rather than from anything recorded at fetch
+    time, which could drift from what is actually stored.
+    """
+    row = conn.execute(
+        "SELECT id, capability, params_json, params_hash, cost_usd, fetched_at, "
+        "LENGTH(body) AS bytes FROM raw_response WHERE id = ?",
+        (response_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    detail = dict(row)
+    # One query per projected table. The list is fixed and short, and each is an
+    # indexed count, so this stays well inside a keypress.
+    detail["projects"] = [
+        {"table": table, "rows": count}
+        for table in PROJECTED_TABLES
+        if (
+            count := int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS rows FROM {table} WHERE raw_id = ?",
+                    (response_id,),
+                ).fetchone()["rows"]
+            )
+        )
+    ]
+    detail["job"] = conn.execute(
+        "SELECT id, status, estimated_cost, actual_cost FROM job WHERE raw_id = ? LIMIT 1",
+        (response_id,),
+    ).fetchone()
+    return detail
+
+
 def keyword_detail(conn: sqlite3.Connection, keyword: str) -> dict[str, Any] | None:
     """Everything the cache knows about one keyword, for the detail pane.
 
@@ -357,7 +491,8 @@ def keyword_detail(conn: sqlite3.Connection, keyword: str) -> dict[str, Any] | N
     """
     target = keyword.strip().lower()
     row = conn.execute(
-        "SELECT keyword, volume, cpc, competition, has_aio, updated_at "
+        "SELECT keyword, volume, cpc, competition, has_aio, updated_at, raw_id, "
+        "difficulty, intent, intent_probability "
         "FROM keyword WHERE keyword = ?",
         (target,),
     ).fetchone()
@@ -375,7 +510,25 @@ def keyword_detail(conn: sqlite3.Connection, keyword: str) -> dict[str, Any] | N
         (target,),
     ).fetchone()
 
+    # The monthly series, in time order. Bounded to two years: the vendor returns
+    # twelve months and a re-pull adds another twelve, and a sparkline of an
+    # unbounded series would compress the recent months into nothing.
+    months = conn.execute(
+        "SELECT year, month, volume FROM keyword_month WHERE keyword = ? "
+        "ORDER BY year DESC, month DESC LIMIT 24",
+        (target,),
+    ).fetchall()
+
     detail = dict(row)
     detail["ranks"] = [dict(rank) for rank in ranks]
     detail["gsc"] = dict(gsc) if gsc["impressions"] else None
+    detail["months"] = [dict(month) for month in reversed(months)]
+    detail["source"] = (
+        conn.execute(
+            "SELECT capability, cost_usd, fetched_at FROM raw_response WHERE id = ?",
+            (row["raw_id"],),
+        ).fetchone()
+        if row["raw_id"] is not None
+        else None
+    )
     return detail

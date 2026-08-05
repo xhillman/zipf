@@ -16,17 +16,17 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Final
 
 from rich.text import Text
 
 from zipf import capabilities
-from zipf.clock import from_iso, now
+from zipf.clock import as_days, from_iso, now
 from zipf.format import ABSENT, meter, plural
 from zipf.jobs.describe import job_subject, status_style
-from zipf.services import browse
+from zipf.services import browse, volume
 from zipf.services import gap as gap_service
 from zipf.services.budget import BudgetStatus
 from zipf.sources.dataforseo import labs
@@ -38,12 +38,38 @@ DOMAINS: Final = "domains"
 DOMAIN: Final = "domain"
 GAPS: Final = "gaps"
 GAP: Final = "gap"
+STALE: Final = "stale"
 GSC: Final = "gsc"
 VISIBILITY: Final = "visibility"
+RESPONSES: Final = "responses"
+RESPONSE: Final = "response"
 
 #: What a table's row keys name, which decides what the detail pane can look up.
 KEYWORD_KEY: Final = "keyword"
 OPAQUE_KEY: Final = "opaque"
+RESPONSE_KEY: Final = "response"
+
+#: The question each view exists to answer, shown where a title would go.
+#:
+#: A bucket name tells you which table you are looking at, which you already
+#: know — you just selected it. The question tells you what the table is for,
+#: which is the part that is easy to lose halfway through a session.
+QUESTIONS: Final[dict[str, str]] = {
+    KEYWORDS: "Which keywords are worth pursuing?",
+    DOMAINS: "Who else ranks in this space?",
+    DOMAIN: "What does {arg} already rank for?",
+    GAPS: "Where is the space I have not taken?",
+    GAP: "What do they rank for that I do not?",
+    STALE: "Is fresh data worth buying?",
+    GSC: "What am I already getting clicks for?",
+    VISIBILITY: "Where am I cited by answer engines?",
+    RESPONSES: "Can I trust where this data came from?",
+    RESPONSE: "What did response #{arg} produce?",
+}
+
+#: Appended to the header of whichever column the table is sorted by. Stripped
+#: again by ``sort_for_column``, so clicking a sorted header still resolves.
+SORT_MARK: Final = " ↓"
 
 #: Which sort keys each view offers, in the order pressing sort cycles through
 #: them. Only views backed by a sortable query appear: a gap pull is already
@@ -52,6 +78,7 @@ SORT_CYCLES: Final[dict[str, tuple[str, ...]]] = {
     KEYWORDS: tuple(browse.KEYWORD_SORTS),
     DOMAINS: tuple(browse.DOMAIN_SORTS),
     GSC: tuple(browse.GSC_SORTS),
+    RESPONSES: tuple(browse.RESPONSE_SORTS),
 }
 
 #: Column header to sort key, for sorting by clicking a header. Absent headers
@@ -60,6 +87,7 @@ SORT_BY_COLUMN: Final[dict[str, dict[str, str]]] = {
     KEYWORDS: {"keyword": "keyword", "vol": "volume", "age": "updated", "pos": "position"},
     DOMAINS: {"domain": "domain", "keywords": "keywords", "age": "observed"},
     GSC: {"query": "query", "clicks": "clicks", "impr": "impressions", "pos": "position"},
+    RESPONSES: {"fetched": "fetched", "cost": "cost", "bytes": "bytes"},
 }
 
 
@@ -78,8 +106,25 @@ def next_sort(kind: str, current: str | None) -> str | None:
 
 
 def sort_for_column(kind: str, column: str) -> str | None:
-    """The sort key a column header maps to, or ``None`` if it is not sortable."""
-    return SORT_BY_COLUMN.get(kind, {}).get(column)
+    """The sort key a column header maps to, or ``None`` if it is not sortable.
+
+    Strips the sort marker first, so the column currently being sorted by is
+    still clickable — otherwise sorting by a column once would make it inert.
+    """
+    return SORT_BY_COLUMN.get(kind, {}).get(column.removesuffix(SORT_MARK))
+
+
+#: Which projected table each row of a response's detail opens. Values are view
+#: kinds rather than ``View`` instances because this is read before the dataclass
+#: below exists. Tables with no browsable view are absent rather than mapped to
+#: something approximate.
+_TABLE_VIEWS: Final[dict[str, str]] = {
+    "keyword": KEYWORDS,
+    "keyword_month": KEYWORDS,
+    "domain_keyword": DOMAINS,
+    "gsc_query": GSC,
+    "observation": VISIBILITY,
+}
 
 
 def drill_target(view: View, key: str) -> View | None:
@@ -93,6 +138,11 @@ def drill_target(view: View, key: str) -> View | None:
         return View(DOMAIN, key)
     if view.kind == GAPS:
         return View(GAP, key)
+    if view.kind == RESPONSES:
+        return View(RESPONSE, key)
+    if view.kind == RESPONSE:
+        kind = _TABLE_VIEWS.get(key)
+        return View(kind) if kind else None
     return None
 
 
@@ -128,14 +178,80 @@ class TableSpec:
     #: and asking for the volume of "ahrefs.com" would report it as unpriced —
     #: an answer that is wrong rather than merely empty.
     key_kind: str = KEYWORD_KEY
+    #: What this view is for. Shown where a bucket name would otherwise go.
+    question: str = ""
+    #: A command this view exists to make typeable, where it has one. Belongs to
+    #: the view rather than to the highlighted row: a planner that names its
+    #: command only when the table is empty names it exactly when it is useless.
+    hint: str = ""
+    #: The ``raw_id`` behind each row, parallel to ``keys``. Empty where the rows
+    #: are not projections of a single response — a gap cluster collapses several
+    #: — in which case the source key does nothing rather than guessing.
+    source_ids: list[int | None] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
         return not self.rows
 
+    def source_of(self, index: int) -> int | None:
+        """The response that produced row ``index``, if the row names just one."""
+        if index >= len(self.source_ids):
+            return None
+        return self.source_ids[index]
+
 
 def _right(value: str) -> Text:
     return Text(value, justify="right")
+
+
+def _headers(kind: str, columns: tuple[str, ...], sort: str | None) -> tuple[str, ...]:
+    """Column labels, with a marker on whichever one the table is ordered by.
+
+    ``dev/notes.md`` asks for a "sorted by" indicator. It goes on the column
+    rather than only in the caption because the column is where you look when
+    you are wondering what the order means.
+    """
+    if sort is None:
+        return columns
+    sorted_column = next(
+        (column for column, key in SORT_BY_COLUMN.get(kind, {}).items() if key == sort), None
+    )
+    return tuple(column + SORT_MARK if column == sorted_column else column for column in columns)
+
+
+#: Two columns reserved in front of every markable row: the glyph, and a space.
+#: Always present, so marking a row cannot shift the column beside it.
+MARK: Final = "◆"
+_GUTTER: Final = 2
+
+
+def _key_cell(value: str, marked: frozenset[str]) -> Text:
+    """A row's identifying cell, with a gutter saying whether it is marked.
+
+    The gutter is reserved whether or not anything is marked, so the table does
+    not reflow the moment you mark something. The glyph carries the state and
+    bold reinforces it — in a table that already has zebra stripes and a cursor
+    highlight, weight alone is too easy to miss.
+
+    The value is still wrapped in ``Text`` rather than interpolated into markup,
+    so a keyword containing brackets reaches the widget intact.
+    """
+    is_marked = value in marked
+    cell = Text(f"{MARK if is_marked else ' '} ")
+    cell.append(value, style="bold" if is_marked else "")
+    return cell
+
+
+#: What the forensic columns add. Kept together so the two places that build
+#: them cannot disagree about the order.
+_FORENSIC_COLUMNS: Final[tuple[str, ...]] = ("src", "fetched")
+
+
+def _forensic_cells(raw_id: int | None, stored: str | None) -> tuple[Text, ...]:
+    return (
+        _right(f"#{raw_id}" if raw_id is not None else "—"),
+        _right((stored or "")[:10]),
+    )
 
 
 def _stale_age(stored: str | None, ttl: timedelta = _VOLUME_TTL) -> str:
@@ -159,7 +275,13 @@ def _aio(has_aio: int | None) -> str:
     return "●" if has_aio else "○"
 
 
-def _keyword_rows(rows: list[dict[str, Any]]) -> TableSpec:
+def _keyword_rows(
+    rows: list[dict[str, Any]],
+    *,
+    sort: str | None = None,
+    marked: frozenset[str] = frozenset(),
+    forensic: bool = False,
+) -> TableSpec:
     """The main keyword table: what it is worth, how old, and where you stand."""
     cells: list[tuple[Text | str, ...]] = []
     for row in rows:
@@ -167,22 +289,26 @@ def _keyword_rows(rows: list[dict[str, Any]]) -> TableSpec:
         position = str(row["position"]) if row["position"] is not None else "—"
         cells.append(
             (
-                Text(row["keyword"]),
+                _key_cell(row["keyword"], marked),
                 _right(volume),
                 _right(_stale_age(row["updated_at"])),
                 _right(_aio(row["has_aio"])),
                 _right(position),
+                *(_forensic_cells(row["raw_id"], row["updated_at"]) if forensic else ()),
             )
         )
+    columns = ("keyword", "vol", "age", "aio", "pos") + (_FORENSIC_COLUMNS if forensic else ())
     return TableSpec(
-        columns=("keyword", "vol", "age", "aio", "pos"),
+        columns=_headers(KEYWORDS, columns, sort),
         rows=cells,
         caption=plural(len(rows), "keyword"),
         keys=[row["keyword"] for row in rows],
+        question=QUESTIONS[KEYWORDS],
+        source_ids=[row["raw_id"] for row in rows],
     )
 
 
-def _domain_rows(rows: list[dict[str, Any]]) -> TableSpec:
+def _domain_rows(rows: list[dict[str, Any]], *, sort: str | None = None) -> TableSpec:
     cells: list[tuple[Text | str, ...]] = [
         (
             Text(row["domain"]),
@@ -193,18 +319,21 @@ def _domain_rows(rows: list[dict[str, Any]]) -> TableSpec:
         for row in rows
     ]
     return TableSpec(
-        columns=("domain", "keywords", "best", "age"),
+        columns=_headers(DOMAINS, ("domain", "keywords", "best", "age"), sort),
         rows=cells,
         caption=plural(len(rows), "domain"),
         keys=[row["domain"] for row in rows],
         key_kind=OPAQUE_KEY,
+        question=QUESTIONS[DOMAINS],
     )
 
 
-def _domain_keyword_rows(rows: list[dict[str, Any]], domain: str) -> TableSpec:
+def _domain_keyword_rows(
+    rows: list[dict[str, Any]], domain: str, *, marked: frozenset[str] = frozenset()
+) -> TableSpec:
     cells: list[tuple[Text | str, ...]] = [
         (
-            Text(row["keyword"]),
+            _key_cell(row["keyword"], marked),
             _right(str(row["position"]) if row["position"] is not None else "—"),
             _right(f"{row['volume']:,}" if row["volume"] is not None else "—"),
             Text((row["url"] or "").removeprefix("https://").removeprefix("http://")),
@@ -216,6 +345,7 @@ def _domain_keyword_rows(rows: list[dict[str, Any]], domain: str) -> TableSpec:
         rows=cells,
         caption=f"{domain} · {plural(len(rows), 'keyword')}",
         keys=[row["keyword"] for row in rows],
+        question=QUESTIONS[DOMAIN].format(arg=domain),
     )
 
 
@@ -234,10 +364,17 @@ def _gap_pair_rows(rows: list[dict[str, Any]]) -> TableSpec:
         caption=plural(len(rows), "gap pull"),
         keys=[f"{row['competitor']}|{row['mine']}" for row in rows],
         key_kind=OPAQUE_KEY,
+        question=QUESTIONS[GAPS],
     )
 
 
-def _gap_rows(conn: sqlite3.Connection, pair: str, contains: str | None) -> TableSpec:
+def _gap_rows(
+    conn: sqlite3.Connection,
+    pair: str,
+    contains: str | None,
+    *,
+    marked: frozenset[str] = frozenset(),
+) -> TableSpec:
     """One gap pull, with restatements of the same query collapsed.
 
     Clustered rather than flat because that is what the CLI shows and what the
@@ -260,7 +397,7 @@ def _gap_rows(conn: sqlite3.Connection, pair: str, contains: str | None) -> Tabl
         ]
     cells: list[tuple[Text | str, ...]] = [
         (
-            Text(cluster.keyword),
+            _key_cell(cluster.keyword, marked),
             _right(f"{cluster.volume:,}" if cluster.volume is not None else "—"),
             _right(str(cluster.position) if cluster.position is not None else "—"),
             _right(f"+{cluster.variant_count - 1}" if cluster.has_variants else ""),
@@ -273,10 +410,11 @@ def _gap_rows(conn: sqlite3.Connection, pair: str, contains: str | None) -> Tabl
         rows=cells,
         caption=f"{competitor} ranks, {mine} does not · {plural(len(clusters), 'distinct query')}",
         keys=[cluster.keyword for cluster in clusters],
+        question=f"What does {competitor} rank for that {mine} does not?",
     )
 
 
-def _gsc_rows(rows: list[dict[str, Any]]) -> TableSpec:
+def _gsc_rows(rows: list[dict[str, Any]], *, sort: str | None = None) -> TableSpec:
     cells: list[tuple[Text | str, ...]] = [
         (
             Text(row["query"]),
@@ -288,10 +426,117 @@ def _gsc_rows(rows: list[dict[str, Any]]) -> TableSpec:
         for row in rows
     ]
     return TableSpec(
-        columns=("query", "clicks", "impr", "pos", "pages"),
+        columns=_headers(GSC, ("query", "clicks", "impr", "pos", "pages"), sort),
         rows=cells,
         caption=plural(len(rows), "query"),
         keys=[row["query"] for row in rows],
+        question=QUESTIONS[GSC],
+    )
+
+
+def _stale_rows(
+    conn: sqlite3.Connection, contains: str | None, *, marked: frozenset[str] = frozenset()
+) -> TableSpec:
+    """The refresh planner: what has aged out, and what one batch would cost.
+
+    A view rather than a control. It prices the work with the same ``plan`` the
+    command would use and then names that command, which keeps the decision to
+    spend where the PRD puts it — typed, not clicked (§9.1).
+    """
+    rows = browse.stale_keywords(conn, contains=contains)
+    batch = volume.plan(conn, [row["keyword"] for row in rows], force=True)
+
+    cells: list[tuple[Text | str, ...]] = [
+        (
+            _key_cell(row["keyword"], marked),
+            _right(f"{row['volume']:,}" if row["volume"] is not None else "—"),
+            _right(_stale_age(row["updated_at"])),
+            _right((row["measured_at"] or "")[:10]),
+            _right(f"#{row['raw_id']}" if row["raw_id"] is not None else "—"),
+        )
+        for row in rows
+    ]
+
+    if not rows:
+        caption = f"everything measured is inside its {as_days(_VOLUME_TTL):.0f}d TTL"
+    else:
+        caption = (
+            f"{plural(len(rows), 'keyword')} past the {as_days(_VOLUME_TTL):.0f}d TTL "
+            f"· {plural(len(batch.batches), 'call')} · ~${batch.estimate.usd:.5f}"
+        )
+
+    return TableSpec(
+        columns=("keyword", "vol", "age", "measured", "src"),
+        rows=cells,
+        caption=caption,
+        keys=[row["keyword"] for row in rows],
+        question=QUESTIONS[STALE],
+        hint=f":vol --stale  ·  ~${batch.estimate.usd:.5f}" if rows else "",
+        source_ids=[row["raw_id"] for row in rows],
+    )
+
+
+def _response_rows(rows: list[dict[str, Any]], *, sort: str | None = None) -> TableSpec:
+    """The acquisition ledger: bought once, owned forever, and rebuildable."""
+    cells: list[tuple[Text | str, ...]] = [
+        (
+            _right(f"#{row['id']}"),
+            Text(row["capability"]),
+            Text(_response_subject(row)),
+            _right((row["fetched_at"] or "")[:10]),
+            _right("free" if not row["cost_usd"] else f"${row['cost_usd']:.5f}"),
+            _right(f"{row['bytes']:,}"),
+        )
+        for row in rows
+    ]
+    paid = sum(row["cost_usd"] for row in rows)
+    columns = ("id", "capability", "subject", "fetched", "cost", "bytes")
+    return TableSpec(
+        columns=_headers(RESPONSES, columns, sort),
+        rows=cells,
+        caption=f"{plural(len(rows), 'stored response')} · ${paid:.5f} paid once",
+        keys=[str(row["id"]) for row in rows],
+        key_kind=RESPONSE_KEY,
+        question=QUESTIONS[RESPONSES],
+        source_ids=[row["id"] for row in rows],
+    )
+
+
+def _response_subject(row: dict[str, Any]) -> str:
+    """What a stored response was about, read from the params it was fetched with.
+
+    The capability alone is not enough: three gap pulls all read
+    ``labs.domain_intersection`` and are otherwise indistinguishable, which is
+    the same problem ``jobs list`` had before the usability pass.
+    """
+    try:
+        params = json.loads(row["params_json"])
+    except (TypeError, ValueError):
+        return ""
+    return job_subject(params)
+
+
+def _response_detail_rows(conn: sqlite3.Connection, response_id: str) -> TableSpec:
+    """One response and everything downstream of it: the ``raw_id`` edge forwards."""
+    if not response_id.isdigit():
+        return _empty(RESPONSE, "that is not a response id", arg=response_id)
+
+    detail = browse.response_detail(conn, int(response_id))
+    if detail is None:
+        return _empty(RESPONSE, f"no response #{response_id} is stored", arg=response_id)
+
+    cells: list[tuple[Text | str, ...]] = [
+        (Text(project["table"]), _right(f"+{project['rows']:,}")) for project in detail["projects"]
+    ]
+    cost = "free" if not detail["cost_usd"] else f"${detail['cost_usd']:.5f}"
+    caption = f"{detail['capability']} · {cost} · {detail['bytes']:,} bytes"
+    return TableSpec(
+        columns=("projected into", "rows"),
+        rows=cells,
+        caption=caption if cells else f"{caption} · read but not projected",
+        keys=[project["table"] for project in detail["projects"]],
+        key_kind=OPAQUE_KEY,
+        question=QUESTIONS[RESPONSE].format(arg=response_id),
     )
 
 
@@ -302,30 +547,54 @@ def table_for(
     own_domain: str | None = None,
     contains: str | None = None,
     sort: str | None = None,
+    marked: frozenset[str] = frozenset(),
+    forensic: bool = False,
 ) -> TableSpec:
     """Build the table for one sidebar selection.
 
-    ``contains`` and ``sort`` are accepted now and wired to the filter and sort
-    commands later; passing them through from the start keeps the signature
-    stable rather than rewriting every call site when those land.
+    ``marked`` and ``forensic`` are display state the app owns: which rows the
+    user has selected, and whether to show where each figure came from. Both are
+    passed in rather than read here so this stays a pure function of the database
+    plus a selection, and stays testable without a terminal.
     """
     if view.kind == KEYWORDS:
         return _keyword_rows(
-            browse.keywords(conn, contains=contains, sort=sort, own_domain=own_domain)
+            browse.keywords(conn, contains=contains, sort=sort, own_domain=own_domain),
+            sort=sort,
+            marked=marked,
+            forensic=forensic,
         )
     if view.kind == DOMAINS:
-        return _domain_rows(browse.domains(conn, contains=contains, sort=sort))
+        return _domain_rows(browse.domains(conn, contains=contains, sort=sort), sort=sort)
     if view.kind == DOMAIN and view.arg:
         return _domain_keyword_rows(
-            browse.domain_keywords(conn, view.arg, contains=contains), view.arg
+            browse.domain_keywords(conn, view.arg, contains=contains), view.arg, marked=marked
         )
     if view.kind == GAPS:
         return _gap_pair_rows(browse.gap_pairs(conn, contains=contains))
     if view.kind == GAP and view.arg:
-        return _gap_rows(conn, view.arg, contains)
+        return _gap_rows(conn, view.arg, contains, marked=marked)
+    if view.kind == STALE:
+        return _stale_rows(conn, contains, marked=marked)
+    if view.kind == RESPONSES:
+        return _response_rows(browse.responses(conn, contains=contains, sort=sort), sort=sort)
+    if view.kind == RESPONSE and view.arg:
+        return _response_detail_rows(conn, view.arg)
     if view.kind == GSC:
-        return _gsc_rows(browse.gsc_queries(conn, contains=contains, sort=sort))
+        return _gsc_rows(browse.gsc_queries(conn, contains=contains, sort=sort), sort=sort)
     return _visibility_placeholder()
+
+
+def _empty(kind: str, caption: str, *, arg: str = "") -> TableSpec:
+    """A view that has a question but nothing to answer it with."""
+    return TableSpec(
+        columns=("",),
+        rows=[],
+        caption=caption,
+        keys=[],
+        key_kind=OPAQUE_KEY,
+        question=QUESTIONS.get(kind, "").format(arg=arg),
+    )
 
 
 def _visibility_placeholder() -> TableSpec:
@@ -340,6 +609,7 @@ def _visibility_placeholder() -> TableSpec:
         caption="nothing sampled yet",
         keys=[],
         key_kind=OPAQUE_KEY,
+        question=QUESTIONS[VISIBILITY],
     )
 
 
@@ -396,6 +666,28 @@ def jobs_markup(rows: Sequence[sqlite3.Row]) -> str:
     return "\n".join(lines)
 
 
+#: Eight levels of block, for the monthly series. The same idea as ``meter`` in
+#: ``format``: one character per reading, so a year fits in twelve columns.
+_SPARK: Final = "▁▂▃▄▅▆▇█"
+
+
+def sparkline(values: Sequence[int]) -> str:
+    """A monthly series as one line of blocks.
+
+    Scaled against the series' own maximum rather than an absolute one, because
+    the question it answers is "when in the year is this searched for", not "is
+    this big". A flat series therefore renders flat, which is the right answer.
+    """
+    if not values:
+        return ""
+    top = max(values)
+    if top <= 0:
+        return _SPARK[0] * len(values)
+    return "".join(
+        _SPARK[min(len(_SPARK) - 1, value * len(_SPARK) // (top + 1))] for value in values
+    )
+
+
 def detail_markup(detail: dict[str, Any] | None, keyword: str) -> str:
     """The detail pane for one keyword. Rich markup, rendered by a Static.
 
@@ -409,17 +701,79 @@ def detail_markup(detail: dict[str, Any] | None, keyword: str) -> str:
     lines = [f"[bold]{detail['keyword']}[/]"]
     volume = f"{detail['volume']:,}" if detail["volume"] is not None else ABSENT
     cpc = f"${detail['cpc']:.2f}" if detail["cpc"] is not None else ABSENT
-    lines.append(f"  volume {volume}   cpc {cpc}   updated {detail['updated_at'] or '—'}")
+    # Difficulty is the only organic figure stored (migration 006). It sits next
+    # to volume and cpc deliberately: those two describe an advertising market,
+    # and reading them without it is how a keyword looks worth writing about
+    # right up until you see it is a 78.
+    difficulty = str(detail["difficulty"]) if detail.get("difficulty") is not None else ABSENT
+    lines.append(f"  volume {volume}   cpc {cpc}   difficulty {difficulty}")
+    lines.append(f"  {_intent(detail)}   [dim]updated {(detail['updated_at'] or '—')[:10]}[/]")
 
     if detail["ranks"]:
         ranked = "  ".join(
             f"{rank['domain']} [bold]#{rank['position']}[/]" for rank in detail["ranks"][:4]
         )
         lines.append(f"  ranks   {ranked}")
+    if detail.get("months"):
+        series = [int(month["volume"]) for month in detail["months"]]
+        low, high = min(series), max(series)
+        lines.append(
+            f"  {len(series)}mo    [bold]{sparkline(series)}[/] [dim]{low:,} to {high:,}[/]"
+        )
     if detail["gsc"]:
         gsc = detail["gsc"]
         lines.append(
             f"  yours   {gsc['clicks']:,} clicks · {gsc['impressions']:,} impressions "
             f"· {plural(gsc['pages'], 'page')}"
         )
+    if detail.get("raw_id") is not None:
+        lines.append(f"  [dim]{_provenance(detail)} · [bold]p[/] opens it[/]")
+    return "\n".join(lines)
+
+
+def _intent(detail: dict[str, Any]) -> str:
+    """What the searcher wanted, with the confidence behind the label.
+
+    The probability is shown because the label alone hides the difference
+    between a keyword classified at 97% and one at 51%, which is a coin toss
+    wearing a label (migration 006).
+    """
+    intent = detail.get("intent")
+    if not intent:
+        return "[dim]intent unknown[/]"
+    probability = detail.get("intent_probability")
+    if probability is None:
+        return str(intent)
+    return f"{intent} [dim]{probability:.0%}[/]"
+
+
+def _provenance(detail: dict[str, Any]) -> str:
+    """Which stored response this keyword's figures came from, and what it cost."""
+    source = detail.get("source")
+    if source is None:
+        return f"from #{detail['raw_id']}"
+    cost = "free" if not source["cost_usd"] else f"${source['cost_usd']:.5f}"
+    return (
+        f"from #{detail['raw_id']} · {source['capability']} · {cost} · {source['fetched_at'][:10]}"
+    )
+
+
+def response_markup(detail: dict[str, Any]) -> str:
+    """The detail pane for one stored response.
+
+    States what it cost and that everything downstream can be rebuilt from it.
+    That second fact is the reason the table is worth opening: it is the
+    difference between owning data and having merely seen it.
+    """
+    cost = "free" if not detail["cost_usd"] else f"${detail['cost_usd']:.5f}"
+    lines = [
+        f"[bold]raw_response #{detail['id']}[/]  [dim]immutable bytes[/]",
+        f"  {detail['capability']}   {cost}   {detail['bytes']:,} bytes"
+        f"   [dim]params {detail['params_hash'][:12]}[/]",
+        f"  fetched {detail['fetched_at'][:16].replace('T', ' ')}",
+    ]
+    job = detail.get("job")
+    if job is not None:
+        lines.append(f"  [dim]queued as job {job['id']} · {job['status']}[/]")
+    lines.append("  [dim]every row above can be rebuilt from these bytes · nothing re-fetched[/]")
     return "\n".join(lines)

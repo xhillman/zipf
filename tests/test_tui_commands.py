@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -47,6 +48,7 @@ class FakeContext:
     own_domain: str | None = "mine.com"
     approve: bool = True
     asked: list[str] = field(default_factory=list)
+    marked: frozenset[str] = frozenset()
 
     async def confirm(self, estimate: PriceEstimate, *, what: str, detail: str = "") -> bool:
         self.asked.append(what)
@@ -56,6 +58,16 @@ class FakeContext:
 @pytest.fixture
 def context(db: sqlite3.Connection) -> FakeContext:
     return FakeContext(read=db, write=db)
+
+
+@pytest.fixture
+def seeded_gap(db: sqlite3.Connection) -> None:
+    """A gap pull already stored and still inside its TTL."""
+    _stored(
+        db,
+        "labs.domain_intersection",
+        '{"target1": "ahrefs.com", "target2": "mine.com", "limit": 100, "intersections": 0}',
+    )
 
 
 def test_parsing_keeps_quoted_keywords_whole() -> None:
@@ -356,3 +368,146 @@ async def test_declining_ideas_queues_nothing(db: sqlite3.Connection) -> None:
 
     assert "nothing queued, nothing spent" in outcome.message
     assert context.write.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Live preview
+# ---------------------------------------------------------------------------
+
+
+def test_previewing_a_paid_command_queues_nothing_and_asks_nothing(
+    context: FakeContext,
+) -> None:
+    """The load-bearing property: pricing is free, so it can run per keystroke.
+
+    If this ever fails, the command bar becomes a way to spend money by typing
+    a character — which is the opposite of the friction the PRD asks for.
+    """
+    before = context.write.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"]
+
+    for text in (":gap", ":gap ahrefs", ":gap ahrefs.com", ":gap ahrefs.com --limit 1000"):
+        commands.preview(context, text)
+
+    assert context.write.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == before
+    assert context.asked == []  # no confirmation was ever requested
+
+
+def test_preview_prices_an_unowned_pull_in_the_spend_register(context: FakeContext) -> None:
+    result = commands.preview(context, ":gap ahrefs.com")
+    assert result.register == "spend"
+    assert result.spends
+    assert result.usd == pytest.approx(0.024)  # 0.012 base + 100 rows
+    assert "ahrefs.com" in result.headline
+
+
+def test_preview_reprices_as_the_depth_changes(context: FakeContext) -> None:
+    """The point of previewing per keystroke: the number moves while you type."""
+    shallow = commands.preview(context, ":gap ahrefs.com --limit 100")
+    deep = commands.preview(context, ":gap ahrefs.com --limit 1000")
+    assert shallow.usd == pytest.approx(0.024)
+    assert deep.usd == pytest.approx(0.132)
+
+
+def test_preview_of_something_already_owned_is_free_not_cheap(
+    context: FakeContext, seeded_gap: None
+) -> None:
+    result = commands.preview(context, ":gap ahrefs.com")
+    assert result.register == "free"
+    assert not result.spends
+    assert result.usd == 0.0
+    assert "already stored" in result.headline
+
+
+def test_half_typed_input_is_described_rather_than_raised(context: FakeContext) -> None:
+    """A command in progress is the normal state of a command bar, not an error."""
+    assert commands.preview(context, ":").register == "idle"
+    assert commands.preview(context, ":gap").register == "error"
+    assert commands.preview(context, ":gpa ahrefs.com").register == "error"
+    assert commands.preview(context, ':vol "unbalanced').register == "error"
+
+
+def test_an_error_preview_carries_its_fix(context: FakeContext) -> None:
+    result = commands.preview(context, ":gap")
+    assert dict(result.lines)["fix"]
+
+
+def test_every_paid_command_previews_before_it_can_run() -> None:
+    """A command that can spend but cannot be previewed would bill you silently."""
+    for command in commands.REGISTRY.values():
+        if command.spends:
+            assert command.preview is not None, command.name
+
+
+# ---------------------------------------------------------------------------
+# Marks feed commands
+# ---------------------------------------------------------------------------
+
+
+def test_bare_vol_reads_the_marked_rows(context: FakeContext) -> None:
+    marked = FakeContext(read=context.read, write=context.write, marked=frozenset({"a", "b"}))
+    result = commands.preview(marked, ":vol")
+    assert result.register == "spend"
+    assert dict(result.lines)["from"] == "2 marked rows"
+
+
+def test_typed_keywords_beat_marks(context: FakeContext) -> None:
+    """An explicit argument is not ambiguous, so it wins over the selection."""
+    marked = FakeContext(read=context.read, write=context.write, marked=frozenset({"a", "b"}))
+    result = commands.preview(marked, ":vol typed")
+    assert dict(result.lines)["from"] == "typed"
+
+
+def test_vol_with_nothing_to_work_on_says_all_three_ways(context: FakeContext) -> None:
+    result = commands.preview(context, ":vol")
+    assert result.register == "error"
+    fix = dict(result.lines)["fix"]
+    assert "space" in fix and "--stale" in fix
+
+
+async def test_queueing_from_marks_consumes_them(context: FakeContext) -> None:
+    marked = FakeContext(read=context.read, write=context.write, marked=frozenset({"a", "b"}))
+    outcome = await commands.execute(marked, ":vol")
+    assert outcome.changed
+    assert outcome.clears_marks
+
+
+async def test_declining_a_spend_keeps_the_marks(context: FakeContext) -> None:
+    """Marks are a decision the user made; a declined purchase does not undo it."""
+    marked = FakeContext(
+        read=context.read, write=context.write, marked=frozenset({"a"}), approve=False
+    )
+    outcome = await commands.execute(marked, ":vol")
+    assert not outcome.clears_marks
+
+
+# ---------------------------------------------------------------------------
+# :vol --stale
+# ---------------------------------------------------------------------------
+
+
+def test_stale_flag_prices_the_whole_refresh_planner(context: FakeContext) -> None:
+    from zipf.clock import now, to_iso
+    from zipf.sources.dataforseo import labs
+
+    aged = to_iso(now() - timedelta(days=45))
+    raw = context.write.execute(
+        "INSERT INTO raw_response (capability, params_hash, params_json, body, "
+        "cost_usd, fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (labs.SEARCH_VOLUME, "h", "{}", b"{}", 0.0, aged),
+    ).lastrowid
+    for keyword in ("aged one", "aged two"):
+        context.write.execute(
+            "INSERT INTO keyword (keyword, volume, updated_at, raw_id) VALUES (?, ?, ?, ?)",
+            (keyword, 100, aged, raw),
+        )
+
+    result = commands.preview(context, ":vol --stale")
+    assert result.register == "spend"
+    assert dict(result.lines)["from"] == "the stale view"
+    assert result.usd == pytest.approx(0.012 + 0.00012 * 2)
+
+
+def test_stale_flag_says_so_when_nothing_has_aged_out(context: FakeContext) -> None:
+    result = commands.preview(context, ":vol --stale")
+    assert result.register == "error"
+    assert "aged out" in result.headline

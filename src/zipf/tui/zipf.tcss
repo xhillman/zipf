@@ -37,6 +37,27 @@ $spend: #d78700;
     width: 1fr;
 }
 
+/* The question this view answers, with the caption beside it. One line: it is
+ * orientation, not content, and a second line would push the table down. */
+#head {
+    height: 1;
+    background: $panel;
+}
+
+#question {
+    width: 1fr;
+    padding: 0 1;
+}
+
+/* A view's hint always names a command that can cost money, so it wears the
+ * spend register. Right-aligned to keep it off the question it sits beside. */
+#hint {
+    width: auto;
+    padding: 0 1;
+    color: $spend;
+    text-align: right;
+}
+
 /* The table takes whatever the detail pane does not. Fixed detail height keeps
  * the row cursor from jumping as you move between keywords with more or fewer
  * known surfaces. */
@@ -63,6 +84,72 @@ $spend: #d78700;
  * register even before a price is named. */
 #command {
     color: $spend;
+    width: 1fr;
+}
+
+/* One row, so the price and the command being typed are read together. */
+#command-row {
+    height: 1;
+    background: $panel;
+}
+
+/* The verdict rides on the right of the bar: what this command would do, in one
+ * line, updated on every keystroke. Its register is the only thing that makes
+ * a paid command look different from a free one before enter is pressed. */
+#verdict {
+    width: auto;
+    max-width: 60%;
+    padding: 0 1;
+    text-align: right;
+    background: $panel;
+}
+
+#verdict.-spend {
+    color: $spend;
+    text-style: bold;
+}
+
+#verdict.-free {
+    color: $success;
+}
+
+#verdict.-error {
+    color: $warning;
+}
+
+#verdict.-info, #verdict.-idle {
+    color: $text-muted;
+}
+
+/* What the typed command would do, priced on every keystroke.
+ *
+ * Sits directly above the command bar so the bill and the thing being typed are
+ * read together. Height is automatic and it is hidden when the bar is closed:
+ * a preview of nothing is chrome, and this interface does not keep chrome.
+ *
+ * The register decides the colour, and this is the only place that mapping
+ * exists. `-spend` is the reserved one; nothing else may resolve to $spend. */
+#plan {
+    height: auto;
+    max-height: 6;
+    padding: 0 1;
+    background: $panel;
+}
+
+#plan.-spend {
+    color: $spend;
+}
+
+#plan.-free {
+    color: $success;
+}
+
+#plan.-error {
+    color: $warning;
+}
+
+#plan.-info, #plan.-idle {
+    color: $text-muted;
 }
 
 ConfirmModal {

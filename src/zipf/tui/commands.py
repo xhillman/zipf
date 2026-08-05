@@ -19,15 +19,16 @@ from __future__ import annotations
 import shlex
 import sqlite3
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Literal, Protocol
 
 from zipf.budget import Budget
 from zipf.clock import as_days
-from zipf.errors import InvalidRequestError
+from zipf.errors import InvalidRequestError, ZipfError
 from zipf.format import plural
 from zipf.jobs import queue
 from zipf.pricing import Plan, PriceEstimate
+from zipf.services import browse
 from zipf.services import budget as budget_service
 from zipf.services import gap as gap_service
 from zipf.services import ideas as ideas_service
@@ -58,6 +59,10 @@ class Outcome:
     #: Whether the app should close. Carried here rather than raising, so quitting
     #: goes through the same path as every other command.
     exits: bool = False
+    #: Whether the marked rows were consumed. Set only when a command actually
+    #: queued work from them: marks that produced nothing are still a selection
+    #: the user made, and clearing them on a declined spend would lose it.
+    clears_marks: bool = False
 
 
 class Context(Protocol):
@@ -80,9 +85,45 @@ class Context(Protocol):
     @property
     def own_domain(self) -> str | None: ...
 
+    @property
+    def marked(self) -> frozenset[str]:
+        """Rows the user has marked, which a command with no arguments reads."""
+        ...
+
     async def confirm(self, estimate: PriceEstimate, *, what: str, detail: str = "") -> bool:
         """Ask before spending. Returns whether to proceed."""
         ...
+
+
+#: What a preview says about a request, which is also what decides its colour.
+#: ``spend`` is the only one allowed the reserved register.
+type Register = Literal["idle", "info", "free", "spend", "error"]
+
+
+@dataclass(frozen=True)
+class Preview:
+    """What a typed command would do, computed without doing any of it.
+
+    Exists because pricing is free: every ``plan`` in ``services/`` is a pure
+    read against the local cache, so the answer to "what would this cost" can be
+    recomputed on every keystroke. That was forced by R5 — only the runner
+    spends — and this is the interface that gets paid back for it.
+
+    Deliberately holds no plan object. A preview is a description for a human;
+    running the command re-plans against the database as it is at that moment,
+    so nothing can be bought against a price computed several keystrokes ago.
+    """
+
+    register: Register
+    headline: str
+    #: Label and value pairs, shown under the bar while the command is being
+    #: typed. Empty for commands whose headline says everything.
+    lines: tuple[tuple[str, str], ...] = ()
+    usd: float = 0.0
+
+    @property
+    def spends(self) -> bool:
+        return self.register == "spend"
 
 
 def take_flag(args: list[str], flag: str) -> tuple[str | None, list[str]]:
@@ -113,6 +154,17 @@ def take_switch(args: list[str], switch: str) -> tuple[bool, list[str]]:
 def _require(args: Sequence[str], *, what: str, example: str) -> None:
     if not args:
         raise InvalidRequestError(f"{what} needs something to work on.", fix=f"Try `{example}`.")
+
+
+def _sample(values: Sequence[str], most: int = 4) -> str:
+    """The first few of a list, saying how many were left out.
+
+    The preview line has one row to work with, and a truncated list that does
+    not admit it was truncated misrepresents what is about to be bought.
+    """
+    if len(values) <= most:
+        return ", ".join(values)
+    return f"{', '.join(values[:most])}, +{len(values) - most} more"
 
 
 @dataclass(frozen=True)
@@ -218,12 +270,96 @@ async def _suggest(context: Context, args: list[str]) -> Outcome:
     )
 
 
+@dataclass(frozen=True)
+class _VolRequest:
+    """A parsed ``:vol``, and where its keywords came from.
+
+    ``source`` exists for the preview. "9 keywords · ~$0.01308" is ambiguous
+    about *which* nine when the keywords were never typed, and a price whose
+    subject is off-screen is exactly the thing the preview is meant to prevent.
+    """
+
+    plan: volume_service.VolumePlan
+    source: str
+
+
+def _vol_request(context: Context, args: list[str]) -> _VolRequest:
+    """Resolve ``:vol`` arguments into a plan. Reads only; costs nothing.
+
+    Three ways to name keywords, in the order they are checked: ``--stale``
+    takes everything the refresh planner is showing, marked rows are used when
+    nothing was typed, and otherwise the arguments are the keywords.
+    """
+    force, args = take_switch(args, "--force")
+    whole_stale, args = take_switch(args, "--stale")
+
+    if whole_stale:
+        stale = browse.stale_keywords(context.read)
+        if not stale:
+            raise InvalidRequestError(
+                "Nothing has aged out.",
+                fix="Every measured keyword is still inside its TTL, so there is nothing to buy.",
+            )
+        keywords = [row["keyword"] for row in stale]
+        source = "the stale view"
+    elif args:
+        keywords, source = args, "typed"
+    elif context.marked:
+        keywords = sorted(context.marked)
+        source = f"{plural(len(keywords), 'marked row')}"
+    else:
+        raise InvalidRequestError(
+            "vol needs something to work on.",
+            fix=(
+                'Try `:vol "best crm software"`, mark rows with space, '
+                "or `:vol --stale` for everything past its TTL."
+            ),
+        )
+
+    # `--stale` rows are stale by definition, so the freshness check they would
+    # otherwise repeat is skipped rather than run twice.
+    return _VolRequest(
+        plan=volume_service.plan(context.read, keywords, force=force or whole_stale),
+        source=source,
+    )
+
+
+def _preview_vol(context: Context, args: list[str]) -> Preview:
+    request = _vol_request(context, args)
+    plan = request.plan
+    if plan.is_free:
+        return Preview(
+            register="free",
+            headline=(
+                f"{plural(len(plan.cached), 'keyword')} already fresh · nothing to buy · $0.00"
+            ),
+            lines=(
+                ("within TTL", f"{as_days(volume_service.VOLUME_TTL):.0f}d"),
+                ("source", request.source),
+            ),
+        )
+    return Preview(
+        register="spend",
+        headline=(
+            f"{plural(len(plan.stale), 'keyword')} · {plural(len(plan.batches), 'job')} "
+            f"· ~${plan.estimate.usd:.5f}"
+        ),
+        lines=(
+            ("from", request.source),
+            (
+                "already fresh",
+                f"{len(plan.cached)} skipped, $0.00" if plan.cached else "none",
+            ),
+            ("would fetch", _sample(plan.stale)),
+        ),
+        usd=plan.estimate.usd,
+    )
+
+
 async def _vol(context: Context, args: list[str]) -> Outcome:
     """Search volume. Tier 1, paid, and free for keywords already owned."""
-    force, args = take_switch(args, "--force")
-    _require(args, what="vol", example=':vol "best crm software" "free crm"')
-
-    plan = volume_service.plan(context.read, args, force=force)
+    request = _vol_request(context, args)
+    plan = request.plan
 
     def queue_batches(conn: sqlite3.Connection) -> str:
         """One job per batch, so a partial failure loses one call, not all of them."""
@@ -233,15 +369,45 @@ async def _vol(context: Context, args: list[str]) -> Outcome:
             f"· ~${plan.estimate.usd:.5f} when it runs"
         )
 
-    return await buy(
+    outcome = await buy(
         context,
         Purchase(
             plan=plan,
             what=f"search volume · {plural(len(plan.stale), 'keyword')}",
+            detail=f"from {request.source}" if request.source != "typed" else "",
             owned=(f"{plural(len(plan.cached), 'keyword')} already fresh · nothing to buy · $0.00"),
             owned_view=View(views.KEYWORDS),
             queue_work=queue_batches,
         ),
+    )
+    if outcome.changed and context.marked:
+        return replace(outcome, clears_marks=True)
+    return outcome
+
+
+def _ideas_plan(context: Context, args: list[str]) -> ideas_service.IdeasPlan:
+    force, args = take_switch(args, "--force")
+    _require(args, what="ideas", example=':ideas "crm software" "project management"')
+    return ideas_service.plan(context.read, args, force=force)
+
+
+def _preview_ideas(context: Context, args: list[str]) -> Preview:
+    plan = _ideas_plan(context, args)
+    if plan.is_free:
+        return Preview(
+            register="free",
+            headline=f"already stored, pulled {as_days(plan.age):.1f}d ago · $0.00",
+            lines=(("seeds", _sample(plan.seeds)),),
+        )
+    return Preview(
+        register="spend",
+        headline=f"{plural(len(plan.seeds), 'seed')} · flat ${plan.estimate.usd:.2f}",
+        lines=(
+            ("seeds", _sample(plan.seeds)),
+            ("flat fee", "twenty seeds and one seed cost the same"),
+            ("rows", "unknown until it arrives"),
+        ),
+        usd=plan.estimate.usd,
     )
 
 
@@ -251,10 +417,7 @@ async def _ideas(context: Context, args: list[str]) -> Outcome:
     The only call here whose price does not move with what you ask for, so the
     message names the seed count: twenty seeds and one seed cost the same.
     """
-    force, args = take_switch(args, "--force")
-    _require(args, what="ideas", example=':ideas "crm software" "project management"')
-
-    plan = ideas_service.plan(context.read, args, force=force)
+    plan = _ideas_plan(context, args)
 
     def queue_call(conn: sqlite3.Connection) -> str:
         return (
@@ -276,8 +439,7 @@ async def _ideas(context: Context, args: list[str]) -> Outcome:
     )
 
 
-async def _ranks(context: Context, args: list[str]) -> Outcome:
-    """What a domain already ranks for, yours by default. Tier 1, paid."""
+def _ranks_plan(context: Context, args: list[str]) -> ranks_service.RanksPlan:
     limit, args = take_flag(args, "--limit")
     force, args = take_switch(args, "--force")
 
@@ -288,12 +450,36 @@ async def _ranks(context: Context, args: list[str]) -> Outcome:
             fix="Pass a domain, as in `:ranks example.com`, or set own_domain in your config.",
         )
 
-    plan = ranks_service.plan(
+    return ranks_service.plan(
         context.read,
         target,
         limit=_positive_int(limit, "--limit", labs.DEFAULT_LIMIT),
         force=force,
     )
+
+
+def _preview_ranks(context: Context, args: list[str]) -> Preview:
+    plan = _ranks_plan(context, args)
+    if plan.is_free:
+        return Preview(
+            register="free",
+            headline=f"already stored, pulled {as_days(plan.age):.1f}d ago · $0.00",
+            lines=(("opens", plan.domain),),
+        )
+    return Preview(
+        register="spend",
+        headline=(f"{plan.domain} · {plural(plan.limit, 'row')} · ~${plan.estimate.usd:.5f}"),
+        lines=(
+            ("asks", f"what {plan.domain} already ranks for"),
+            ("depth", f"limit {plan.limit} (max {labs.MAX_LIMIT})"),
+        ),
+        usd=plan.estimate.usd,
+    )
+
+
+async def _ranks(context: Context, args: list[str]) -> Outcome:
+    """What a domain already ranks for, yours by default. Tier 1, paid."""
+    plan = _ranks_plan(context, args)
     destination = View(views.DOMAIN, plan.domain)
     return await buy(
         context,
@@ -312,12 +498,7 @@ async def _ranks(context: Context, args: list[str]) -> Outcome:
     )
 
 
-async def _gap(context: Context, args: list[str]) -> Outcome:
-    """Keywords a competitor ranks for and you do not. Tier 1, paid.
-
-    Reading a gap already stored is free and silent, which is why the freshness
-    check comes before the price is ever mentioned.
-    """
+def _gap_plan(context: Context, args: list[str]) -> gap_service.GapPlan:
     mine, args = take_flag(args, "--mine")
     limit, args = take_flag(args, "--limit")
     force, args = take_switch(args, "--force")
@@ -330,13 +511,44 @@ async def _gap(context: Context, args: list[str]) -> Outcome:
             fix="Pass `--mine yourdomain.com`, or set own_domain in your config file.",
         )
 
-    plan = gap_service.plan(
+    return gap_service.plan(
         context.read,
         args[0],
         own,
         limit=_positive_int(limit, "--limit", labs.DEFAULT_LIMIT),
         force=force,
     )
+
+
+def _preview_gap(context: Context, args: list[str]) -> Preview:
+    plan = _gap_plan(context, args)
+    if plan.is_free:
+        return Preview(
+            register="free",
+            headline=f"already stored, pulled {as_days(plan.age):.1f}d ago · $0.00",
+            lines=(("opens", f"{plan.competitor} ranks, {plan.mine} does not"),),
+        )
+    return Preview(
+        register="spend",
+        headline=(
+            f"{plan.competitor} vs {plan.mine} · {plural(plan.limit, 'row')} "
+            f"· ~${plan.estimate.usd:.5f}"
+        ),
+        lines=(
+            ("asks", f"what {plan.competitor} ranks for and {plan.mine} does not"),
+            ("depth", f"limit {plan.limit} (max {labs.MAX_LIMIT})"),
+        ),
+        usd=plan.estimate.usd,
+    )
+
+
+async def _gap(context: Context, args: list[str]) -> Outcome:
+    """Keywords a competitor ranks for and you do not. Tier 1, paid.
+
+    Reading a gap already stored is free and silent, which is why the freshness
+    check comes before the price is ever mentioned.
+    """
+    plan = _gap_plan(context, args)
     target = View(views.GAP, f"{plan.competitor}|{plan.mine}")
     return await buy(
         context,
@@ -389,6 +601,58 @@ def _positive_int(value: str | None, flag: str, fallback: int) -> int:
     return int(value)
 
 
+def _preview_help(context: Context, args: list[str]) -> Preview:
+    return Preview(
+        register="info",
+        headline=f"{plural(len(REGISTRY), 'command')} · * costs money",
+        lines=tuple(
+            (f":{command.name}{'*' if command.spends else ''}", command.summary)
+            for command in REGISTRY.values()
+        ),
+    )
+
+
+def _preview_cancel(context: Context, args: list[str]) -> Preview:
+    _require(args, what="cancel", example=":cancel 7")
+    if not args[0].isdigit():
+        raise InvalidRequestError(
+            f"{args[0]!r} is not a job number.",
+            fix="Take the number from the jobs pane, as in `:cancel 7`.",
+        )
+    job = queue.get(context.read, int(args[0]))
+    if job is None:
+        raise InvalidRequestError(
+            f"There is no job {args[0]}.", fix="Take the number from the jobs pane."
+        )
+    if job["status"] != "queued":
+        return Preview(
+            register="error",
+            headline=f"job {args[0]} is {job['status']} — too late to cancel",
+        )
+    return Preview(
+        register="info",
+        headline=f"drop job {args[0]} · nothing spent",
+        lines=(("would have cost", f"${job['estimated_cost']:.5f}"),),
+    )
+
+
+def _preview_suggest(context: Context, args: list[str]) -> Preview:
+    _require(args, what="suggest", example=":suggest crm software")
+    return Preview(
+        register="free",
+        headline="autocomplete · tier 0 · $0.00",
+        lines=(("seed", " ".join(args)),),
+    )
+
+
+def _preview_budget(context: Context, args: list[str]) -> Preview:
+    return Preview(register="free", headline="refresh the vendor balance · free, one round trip")
+
+
+def _preview_quit(context: Context, args: list[str]) -> Preview:
+    return Preview(register="info", headline="close zipf")
+
+
 @dataclass(frozen=True)
 class Command:
     name: str
@@ -397,20 +661,44 @@ class Command:
     #: Whether running this can cost money. Drives the accent colour: the two
     #: visual registers only mean something if the split is declared, not guessed.
     spends: bool = False
+    #: What this command would do, computed without doing it. Runs on every
+    #: keystroke, so it must be a pure local read — every ``plan`` in
+    #: ``services/`` already is, which is what makes this affordable.
+    preview: Callable[[Context, list[str]], Preview] | None = None
 
 
 REGISTRY: Final[dict[str, Command]] = {
     command.name: command
     for command in (
-        Command("help", "list the commands", _help),
-        Command("quit", "close zipf", _quit),
-        Command("budget", "refresh spend and vendor balance", _budget),
-        Command("cancel", "drop a queued job before it runs", _cancel),
-        Command("suggest", "autocomplete suggestions for a seed", _suggest),
-        Command("vol", "search volume for keywords", _vol, spends=True),
-        Command("ranks", "what a domain already ranks for", _ranks, spends=True),
-        Command("ideas", "discover keywords with volume attached", _ideas, spends=True),
-        Command("gap", "keywords a competitor ranks for and you do not", _gap, spends=True),
+        Command("help", "list the commands", _help, preview=_preview_help),
+        Command("quit", "close zipf", _quit, preview=_preview_quit),
+        Command("budget", "refresh spend and vendor balance", _budget, preview=_preview_budget),
+        Command("cancel", "drop a queued job before it runs", _cancel, preview=_preview_cancel),
+        Command(
+            "suggest", "autocomplete suggestions for a seed", _suggest, preview=_preview_suggest
+        ),
+        Command("vol", "search volume for keywords", _vol, spends=True, preview=_preview_vol),
+        Command(
+            "ranks",
+            "what a domain already ranks for",
+            _ranks,
+            spends=True,
+            preview=_preview_ranks,
+        ),
+        Command(
+            "ideas",
+            "discover keywords with volume attached",
+            _ideas,
+            spends=True,
+            preview=_preview_ideas,
+        ),
+        Command(
+            "gap",
+            "keywords a competitor ranks for and you do not",
+            _gap,
+            spends=True,
+            preview=_preview_gap,
+        ),
     )
 }
 
@@ -454,3 +742,35 @@ async def execute(context: Context, text: str) -> Outcome:
     """Parse and run one typed command."""
     command, args = parse(text)
     return await command.run(context, args)
+
+
+#: Shown before anything has been typed. Not an error: an empty bar is a bar
+#: waiting for input, and colouring it red would make opening it look like a
+#: mistake.
+_IDLE = Preview(register="idle", headline="type a command · :help lists them")
+
+
+def preview(context: Context, text: str) -> Preview:
+    """What running ``text`` would do, without running any of it.
+
+    Safe to call on every keystroke. Everything it reaches is a local read: the
+    ``plan`` functions price against the cache, and ``queue.get`` reads one row.
+    Nothing here touches the write handle or the network, so a half-typed
+    ``:gap a.com`` cannot buy anything — it can only be described.
+
+    Errors come back as a preview rather than an exception because half-typed
+    input is the normal state of a command bar. ``:ga`` is not a mistake to
+    report, it is a command in progress, and the honest thing to show is what is
+    wrong with it so far.
+    """
+    if not text.strip().removeprefix(":").strip():
+        return _IDLE
+    try:
+        command, args = parse(text)
+        builder = command.preview
+        if builder is None:
+            return Preview(register="info", headline=command.summary)
+        return builder(context, args)
+    except ZipfError as exc:
+        lines = (("fix", exc.fix),) if exc.fix else ()
+        return Preview(register="error", headline=exc.problem, lines=lines)

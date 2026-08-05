@@ -16,9 +16,11 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+from textual.containers import Horizontal
 from textual.widgets import DataTable, Input, Static, Tree
 
 from zipf.budget import Budget
+from zipf.clock import now_iso
 from zipf.db.connection import open_ro
 from zipf.errors import DatabaseMissingError
 from zipf.jobs import queue as job_queue
@@ -96,7 +98,14 @@ async def test_sidebar_lists_every_bucket(seeded: sqlite3.Connection) -> None:
     async with app.run_test():
         tree = app.query_one("#sidebar", Tree)
         labels = [str(node.label) for node in tree.root.children]
-        assert labels == ["domains  1", "gaps  1", "gsc  0", "visibility  0"]
+        assert labels == [
+            "domains  1",
+            "gaps  1",
+            "stale  0",
+            "gsc  0",
+            "visibility  0",
+            "responses  1",
+        ]
         assert str(tree.root.label) == "cache  2"
 
 
@@ -274,7 +283,8 @@ async def test_s_cycles_the_sort_and_says_which(seeded: sqlite3.Connection) -> N
         await pilot.pause()
         assert "by keyword" in app.sub_title
         first_row = app.query_one("#rows", DataTable).get_row_at(0)
-        assert str(first_row[0]) == "best crm software"  # alphabetical, not by volume
+        # Alphabetical, not by volume. Leading gutter is the mark column.
+        assert str(first_row[0]).lstrip() == "best crm software"
 
 
 async def test_sorting_a_view_with_no_order_is_reported(seeded: sqlite3.Connection) -> None:
@@ -368,7 +378,7 @@ async def test_escape_closes_the_command_bar_without_running_it(
         await _type(pilot, "gap ahrefs.com")
         await pilot.press("escape")
         await pilot.pause()
-        assert not app.query_one("#command", Input).display
+        assert not app.query_one("#command-row", Horizontal).display
         assert seeded.execute("SELECT COUNT(*) AS n FROM job").fetchone()["n"] == 0
 
 
@@ -435,7 +445,7 @@ async def test_an_unknown_command_reports_rather_than_crashing(
         await pilot.press("enter")
         await pilot.pause()
         assert app.is_running  # survived
-        assert not app.query_one("#command", Input).display
+        assert not app.query_one("#command-row", Horizontal).display
 
 
 async def test_quit_command_closes_the_app(seeded: sqlite3.Connection) -> None:
@@ -562,3 +572,269 @@ async def test_cancelling_a_finished_job_reports_rather_than_lying(
         await pilot.press("enter")
         await pilot.pause()
         assert app.is_running
+
+
+# ---------------------------------------------------------------------------
+# The command bar prices what you type, while you type it
+# ---------------------------------------------------------------------------
+
+
+async def test_opening_the_command_bar_shows_a_verdict(seeded: sqlite3.Connection) -> None:
+    """Opening the bar says what it is for, without pretending to price nothing."""
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        assert app.query_one("#command-row", Horizontal).display is False
+        await pilot.press("colon")
+        await pilot.pause()
+
+        assert app.query_one("#command-row", Horizontal).display is True
+        verdict = app.query_one("#verdict", Static)
+        assert verdict.has_class("-idle")
+        assert ":help" in str(verdict.render())
+        # An idle prompt has nothing to itemise, so the block below stays away.
+        assert app.query_one("#plan", Static).display is False
+
+
+async def test_typing_a_paid_command_wears_the_spend_register(
+    seeded: sqlite3.Connection,
+) -> None:
+    """The two registers, made continuous: the colour changes before enter."""
+    app = ZipfApp(seeded, write_conn=seeded, own_domain="mine.com")
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        app.query_one("#command", Input).value = ":gap ahrefs.com"
+        await pilot.pause()
+
+        verdict = app.query_one("#verdict", Static)
+        assert verdict.has_class("-spend")
+        assert "$0.02400" in str(verdict.render())
+        assert app.query_one("#plan", Static).has_class("-spend")
+
+
+async def test_typing_a_command_queues_nothing(seeded: sqlite3.Connection) -> None:
+    """Priced, not run. Nothing reaches the queue until enter and a confirmation."""
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        for value in (":gap", ":gap ahrefs", ":gap ahrefs.com"):
+            app.query_one("#command", Input).value = value
+            await pilot.pause()
+        assert job_queue.recent(seeded) == []
+
+
+async def test_a_stored_pull_previews_as_free(seeded: sqlite3.Connection) -> None:
+    """Reading what you already own is never gated, and says so before enter.
+
+    The fixture's own pull is deliberately older than its TTL, so this seeds a
+    fresh one: the difference between the two is the whole point of the register.
+    """
+    seeded.execute(
+        "INSERT INTO raw_response (capability, params_hash, params_json, body, cost_usd, "
+        "fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "labs.domain_intersection",
+            "h-fresh",
+            '{"target1": "fresh.com", "target2": "mine.com", "limit": 100, "intersections": 0}',
+            b"{}",
+            0.024,
+            now_iso(),
+        ),
+    )
+    app = ZipfApp(seeded, write_conn=seeded, own_domain="mine.com")
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        app.query_one("#command", Input).value = ":gap fresh.com"
+        await pilot.pause()
+
+        verdict = app.query_one("#verdict", Static)
+        assert verdict.has_class("-free")
+        assert "already stored" in str(verdict.render())
+
+
+async def test_closing_the_bar_takes_the_plan_with_it(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("colon")
+        await pilot.press("escape")
+        assert app.query_one("#plan", Static).display is False
+
+
+# ---------------------------------------------------------------------------
+# Marks, provenance and density
+# ---------------------------------------------------------------------------
+
+
+async def test_space_marks_the_row_under_the_cursor(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("space")
+        assert len(app.marked) == 1
+        assert "1 marked" in app.sub_title
+
+        await pilot.press("space")
+        assert app.marked == frozenset()
+
+
+async def test_marks_survive_a_change_of_view(seeded: sqlite3.Connection) -> None:
+    """A mark is a decision about a keyword, not about the table it was in."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("space")
+        marked = app.marked
+        app.show_view(views.View(views.DOMAINS))
+        await pilot.pause()
+        assert app.marked == marked
+
+
+async def test_p_opens_the_response_behind_a_row(seeded: sqlite3.Connection) -> None:
+    """The raw_id edge walked backwards, from a figure to the bytes behind it."""
+    raw_id = seeded.execute(
+        "INSERT INTO raw_response (capability, params_hash, params_json, body, cost_usd, "
+        "fetched_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ("labs.search_volume", "h-src", '{"keywords": ["tracked"]}', b"{}", 0.012, now_iso()),
+    ).lastrowid
+    seeded.execute(
+        "INSERT INTO keyword (keyword, volume, updated_at, raw_id) VALUES (?, ?, ?, ?)",
+        ("tracked", 99999, now_iso(), raw_id),
+    )
+
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        app.show_view(views.View(views.KEYWORDS))
+        await pilot.pause()
+        await pilot.press("p")
+
+        question = str(app.query_one("#question", Static).render())
+        assert "response #" in question
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert "Which keywords" in str(app.query_one("#question", Static).render())
+
+
+async def test_p_on_a_row_with_no_source_says_so(seeded: sqlite3.Connection) -> None:
+    """A domain row aggregates many responses; naming one would be a guess."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        app.show_view(views.View(views.DOMAINS))
+        await pilot.pause()
+        await pilot.press("p")
+        assert "Who else ranks" in str(app.query_one("#question", Static).render())
+
+
+async def test_d_reveals_and_hides_the_sources(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        table = app.query_one("#rows", DataTable)
+        assert "src" not in [str(column.label) for column in table.columns.values()]
+
+        await pilot.press("d")
+        assert "src" in [str(column.label) for column in table.columns.values()]
+
+        await pilot.press("d")
+        assert "src" not in [str(column.label) for column in table.columns.values()]
+
+
+async def test_the_planner_puts_its_command_on_screen(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        app.show_view(views.View(views.STALE))
+        await pilot.pause()
+        # Seeded keywords are fresh, so the planner has nothing to offer.
+        assert str(app.query_one("#hint", Static).render()) == ""
+        assert "Is fresh data worth buying?" in str(app.query_one("#question", Static).render())
+
+
+async def test_the_mark_count_is_reported_only_where_marks_apply(
+    seeded: sqlite3.Connection,
+) -> None:
+    """Marks survive navigation, but a table with nothing markable must not
+    claim state the screen cannot show."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("space")
+        assert "1 marked" in app.sub_title
+
+        app.show_view(views.View(views.RESPONSES))
+        await pilot.pause()
+        assert "marked" not in app.sub_title
+        assert app.marked  # the mark itself is still held
+
+
+async def test_marking_a_row_does_not_move_the_cursor(seeded: sqlite3.Connection) -> None:
+    """Marking rebuilds the table, which resets the cursor unless it is restored.
+
+    Without this the cursor jumps to the top the moment you mark anything, which
+    makes gathering a batch of marks impossible.
+    """
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        table = app.query_one("#rows", DataTable)
+        await pilot.press("down")
+        assert table.cursor_row == 1
+        keyword = str(table.get_row_at(1)[0]).lstrip()
+
+        await pilot.press("space")
+        assert table.cursor_row == 1
+        assert str(table.get_row_at(1)[0]) == f"{views.MARK} {keyword}"
+        assert app.marked == frozenset({keyword})
+
+
+async def test_sorting_keeps_your_place_where_the_row_survives(
+    seeded: sqlite3.Connection,
+) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        table = app.query_one("#rows", DataTable)
+        await pilot.press("down")
+        row = str(table.get_row_at(table.cursor_row)[0])
+
+        await pilot.press("s")
+        await pilot.pause()
+        assert str(table.get_row_at(table.cursor_row)[0]) == row
+
+
+# ---------------------------------------------------------------------------
+# The contextual footer
+# ---------------------------------------------------------------------------
+
+
+async def test_the_footer_offers_only_keys_that_apply_here(
+    seeded: sqlite3.Connection,
+) -> None:
+    """Marking is meaningless in the ledger, so it is not offered there."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        assert app.check_action("mark", ()) is True
+        assert app.check_action("source", ()) is True
+        assert app.check_action("sort", ()) is True
+
+        app.show_view(views.View(views.RESPONSES))
+        await pilot.pause()
+        assert app.check_action("mark", ()) is None
+        assert app.check_action("source", ()) is None
+        assert app.check_action("sort", ()) is True  # the ledger sorts
+
+        app.show_view(views.View(views.GAP, "a.com|b.com"))
+        await pilot.pause()
+        assert app.check_action("sort", ()) is None  # already ordered by opportunity
+
+
+async def test_escape_is_never_disabled(seeded: sqlite3.Connection) -> None:
+    """It closes whichever bar is open. A gated escape strands you in one.
+
+    Textual's `check_action` hides *and* disables, so anything gated here stops
+    responding — which for escape would mean the command bar could not be closed
+    from a view with nothing to go back to.
+    """
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        assert app.check_action("escape", ()) is True
+
+        await pilot.press("colon")
+        await pilot.pause()
+        assert app.query_one("#command-row", Horizontal).display
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.query_one("#command-row", Horizontal).display
