@@ -84,10 +84,10 @@ async def test_opens_on_keywords(seeded: sqlite3.Connection) -> None:
         assert table.row_count == 2
         assert [str(column.label) for column in table.columns.values()] == [
             "keyword",
-            "vol",
-            "age",
-            "aio",
-            "pos",
+            "volume",
+            "intent",
+            "difficulty",
+            "cpc",
         ]
         assert app.sub_title == "2 keywords"
 
@@ -281,9 +281,10 @@ async def test_s_cycles_the_sort_and_says_which(seeded: sqlite3.Connection) -> N
         assert "by volume" in app.sub_title
         await pilot.press("s")
         await pilot.pause()
-        assert "by keyword" in app.sub_title
+        assert "by difficulty" in app.sub_title
         first_row = app.query_one("#rows", DataTable).get_row_at(0)
-        # Alphabetical, not by volume. Leading gutter is the mark column.
+        # Neither keyword has a difficulty, so an unknown falls back to the
+        # keyword rather than pretending to be a zero. Gutter is the mark column.
         assert str(first_row[0]).lstrip() == "best crm software"
 
 

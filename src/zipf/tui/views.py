@@ -84,7 +84,13 @@ SORT_CYCLES: Final[dict[str, tuple[str, ...]]] = {
 #: Column header to sort key, for sorting by clicking a header. Absent headers
 #: are not sortable — ``aio`` has one of three values and ``url`` is incidental.
 SORT_BY_COLUMN: Final[dict[str, dict[str, str]]] = {
-    KEYWORDS: {"keyword": "keyword", "vol": "volume", "age": "updated", "pos": "position"},
+    KEYWORDS: {
+        "keyword": "keyword",
+        "volume": "volume",
+        "intent": "intent",
+        "difficulty": "difficulty",
+        "cpc": "cpc",
+    },
     DOMAINS: {"domain": "domain", "keywords": "keywords", "age": "observed"},
     GSC: {"query": "query", "clicks": "clicks", "impr": "impressions", "pos": "position"},
     RESPONSES: {"fetched": "fetched", "cost": "cost", "bytes": "bytes"},
@@ -286,18 +292,21 @@ def _keyword_rows(
     cells: list[tuple[Text | str, ...]] = []
     for row in rows:
         volume = f"{row['volume']:,}" if row["volume"] is not None else "—"
-        position = str(row["position"]) if row["position"] is not None else "—"
+        difficulty = str(row["difficulty"]) if row["difficulty"] is not None else "—"
+        cpc = f"${row['cpc']:.2f}" if row["cpc"] is not None else "—"
         cells.append(
             (
                 _key_cell(row["keyword"], marked),
                 _right(volume),
-                _right(_stale_age(row["updated_at"])),
-                _right(_aio(row["has_aio"])),
-                _right(position),
+                Text(row["intent"] or "—"),
+                _right(difficulty),
+                _right(cpc),
                 *(_forensic_cells(row["raw_id"], row["updated_at"]) if forensic else ()),
             )
         )
-    columns = ("keyword", "vol", "age", "aio", "pos") + (_FORENSIC_COLUMNS if forensic else ())
+    columns = ("keyword", "volume", "intent", "difficulty", "cpc") + (
+        _FORENSIC_COLUMNS if forensic else ()
+    )
     return TableSpec(
         columns=_headers(KEYWORDS, columns, sort),
         rows=cells,

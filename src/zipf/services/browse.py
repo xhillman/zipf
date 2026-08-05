@@ -36,8 +36,15 @@ MAX_ROWS: Final = 5_000
 #: Sort keys for the keyword table, mapped to SQL. NULL volumes sort last in
 #: both directions: a keyword whose volume was never bought is not "the smallest
 #: volume", it is an unknown, and burying it under real data is misleading.
+#: Each key puts the most interesting end first: the biggest volume, the *lowest*
+#: difficulty, the highest cpc. Difficulty is the one that runs ascending, because
+#: an easy keyword is the good one and a sort that buried it under 90s would be
+#: answering the opposite question.
 KEYWORD_SORTS: Final[dict[str, str]] = {
     "volume": "CASE WHEN k.volume IS NULL THEN 1 ELSE 0 END, k.volume DESC, k.keyword",
+    "difficulty": "CASE WHEN k.difficulty IS NULL THEN 1 ELSE 0 END, k.difficulty, k.keyword",
+    "cpc": "CASE WHEN k.cpc IS NULL THEN 1 ELSE 0 END, k.cpc DESC, k.keyword",
+    "intent": "CASE WHEN k.intent IS NULL THEN 1 ELSE 0 END, k.intent, k.keyword",
     "keyword": "k.keyword",
     "updated": "k.updated_at DESC, k.keyword",
     "position": "CASE WHEN own.position IS NULL THEN 1 ELSE 0 END, own.position, k.keyword",
@@ -206,7 +213,7 @@ def keywords(
     rows = conn.execute(
         f"""
         SELECT k.keyword, k.volume, k.cpc, k.competition, k.has_aio, k.updated_at,
-               k.raw_id, own.position
+               k.raw_id, k.difficulty, k.intent, k.intent_probability, own.position
         FROM keyword k
         LEFT JOIN ({_LATEST_RANK}) own
           ON own.keyword = k.keyword AND own.domain = ?

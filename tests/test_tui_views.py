@@ -41,27 +41,51 @@ def seeded(db: sqlite3.Connection) -> sqlite3.Connection:
     return db
 
 
-def test_keyword_view_has_the_columns_from_the_mock(seeded: sqlite3.Connection) -> None:
+def test_keyword_view_leads_with_what_decides_a_keyword(
+    seeded: sqlite3.Connection,
+) -> None:
+    """The landing table: demand, what the searcher wanted, and what it costs."""
     spec = views.table_for(seeded, View(views.KEYWORDS))
-    assert spec.columns == ("keyword", "vol", "age", "aio", "pos")
+    assert spec.columns == ("keyword", "volume", "intent", "difficulty", "cpc")
     assert spec.key_kind == views.KEYWORD_KEY
 
 
-def test_age_renders_only_past_ttl(seeded: sqlite3.Connection) -> None:
-    """Below the TTL the stored figure is current, so the age column stays silent."""
-    spec = views.table_for(seeded, View(views.KEYWORDS))
-    ages = {str(spec.keys[i]): str(row[2]) for i, row in enumerate(spec.rows)}
-    assert ages["fresh keyword"] == ""
-    assert ages["stale keyword"] == "45d!"
+def test_age_renders_only_past_ttl(db: sqlite3.Connection) -> None:
+    """Below the TTL the stored figure is current, so the age column stays silent.
+
+    Asserted on the domain table, which is where an age column now lives: the
+    keyword table leads with what decides a keyword, and staleness has its own
+    view and its own sidebar count.
+    """
+    recent = to_iso(now() - timedelta(days=2))
+    old = to_iso(now() - timedelta(days=45))
+    for domain, observed in (("fresh.com", recent), ("stale.com", old)):
+        db.execute(
+            "INSERT INTO domain_keyword (domain, keyword, position, url, observed_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (domain, "a keyword", 4, f"https://{domain}/x", observed),
+        )
+
+    spec = views.table_for(db, View(views.DOMAINS))
+    ages = {str(spec.keys[i]): str(row[3]) for i, row in enumerate(spec.rows)}
+    assert ages["fresh.com"] == ""
+    assert ages["stale.com"] == "45d!"
 
 
-def test_own_rank_appears_only_for_the_given_domain(seeded: sqlite3.Connection) -> None:
-    with_domain = views.table_for(seeded, View(views.KEYWORDS), own_domain="ahrefs.com")
-    positions = {str(with_domain.keys[i]): str(row[4]) for i, row in enumerate(with_domain.rows)}
-    assert positions["fresh keyword"] == "14"
+def test_sorting_by_rank_needs_the_domain_that_holds_it(
+    seeded: sqlite3.Connection,
+) -> None:
+    """Own rank left the table but not the query: it still orders it.
 
-    without = views.table_for(seeded, View(views.KEYWORDS))
-    assert all(str(row[4]) == "—" for row in without.rows)
+    Without a domain there is no rank to order by, so the sort has to be
+    harmless rather than wrong — every row is an unknown and falls back to the
+    keyword, not to a position it does not have.
+    """
+    ranked = views.table_for(seeded, View(views.KEYWORDS), sort="position", own_domain="ahrefs.com")
+    assert ranked.keys[0] == "fresh keyword"  # the only one with a rank
+
+    without = views.table_for(seeded, View(views.KEYWORDS), sort="position")
+    assert sorted(without.keys) == without.keys
 
 
 def test_stored_text_is_never_parsed_as_markup(db: sqlite3.Connection) -> None:
@@ -188,8 +212,9 @@ def test_every_sort_key_is_one_browse_accepts(seeded: sqlite3.Connection) -> Non
 
 
 def test_column_headers_map_to_sort_keys() -> None:
-    assert views.sort_for_column(views.KEYWORDS, "vol") == "volume"
-    assert views.sort_for_column(views.KEYWORDS, "aio") is None  # three values, no order
+    assert views.sort_for_column(views.KEYWORDS, "volume") == "volume"
+    assert views.sort_for_column(views.KEYWORDS, "difficulty") == "difficulty"
+    assert views.sort_for_column(views.KEYWORDS, "cpc") == "cpc"
     assert views.sort_for_column(views.GAP, "vol") is None
 
 
@@ -240,15 +265,18 @@ def test_every_view_states_the_question_it_answers(seeded: sqlite3.Connection) -
 def test_the_sorted_column_is_marked_in_its_header(seeded: sqlite3.Connection) -> None:
     """`dev/notes.md` asks for a sorted-by indicator; it goes on the column."""
     unsorted = views.table_for(seeded, View(views.KEYWORDS))
-    assert unsorted.columns == ("keyword", "vol", "age", "aio", "pos")
+    assert unsorted.columns == ("keyword", "volume", "intent", "difficulty", "cpc")
 
     by_volume = views.table_for(seeded, View(views.KEYWORDS), sort="volume")
-    assert by_volume.columns == ("keyword", "vol" + views.SORT_MARK, "age", "aio", "pos")
+    assert by_volume.columns[1] == "volume" + views.SORT_MARK
+
+    by_difficulty = views.table_for(seeded, View(views.KEYWORDS), sort="difficulty")
+    assert by_difficulty.columns[3] == "difficulty" + views.SORT_MARK
 
 
 def test_a_marked_column_still_resolves_to_its_sort_key() -> None:
     """Otherwise sorting by a column once would make that column inert."""
-    assert views.sort_for_column(views.KEYWORDS, "vol" + views.SORT_MARK) == "volume"
+    assert views.sort_for_column(views.KEYWORDS, "volume" + views.SORT_MARK) == "volume"
 
 
 def test_marking_shows_a_glyph_without_reflowing_the_table(
@@ -420,3 +448,42 @@ def test_a_seasonal_series_peaks_where_the_data_does() -> None:
 
 def test_an_absent_series_draws_nothing(db: sqlite3.Connection) -> None:
     assert views.sparkline([]) == ""
+
+
+def test_the_landing_table_shows_intent_difficulty_and_cpc(db: sqlite3.Connection) -> None:
+    db.execute(
+        "INSERT INTO keyword (keyword, volume, cpc, updated_at, difficulty, intent, "
+        "intent_probability) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("best crm software", 8100, 22.4, to_iso(now()), 68, "commercial", 0.97),
+    )
+    row = views.table_for(db, View(views.KEYWORDS)).rows[0]
+    assert str(row[1]) == "8,100"
+    assert str(row[2]) == "commercial"
+    assert str(row[3]) == "68"
+    assert str(row[4]) == "$22.40"
+
+
+def test_an_unbought_attribute_is_absent_not_zero(db: sqlite3.Connection) -> None:
+    """A keyword autocomplete suggested has no difficulty, cpc or intent.
+
+    Rendering those as 0 would read as "free clicks, trivially easy", which is
+    the most expensive misreading this table could produce.
+    """
+    db.execute(
+        "INSERT INTO keyword (keyword, updated_at) VALUES (?, ?)",
+        ("only suggested", to_iso(now())),
+    )
+    row = views.table_for(db, View(views.KEYWORDS)).rows[0]
+    assert [str(cell) for cell in row[1:]] == ["—", "—", "—", "—"]
+
+
+def test_difficulty_sorts_easiest_first(db: sqlite3.Connection) -> None:
+    """An easy keyword is the good one; burying it under 90s answers the
+    opposite question to the one being asked."""
+    for keyword, difficulty in (("hard", 90), ("easy", 12), ("unknown", None)):
+        db.execute(
+            "INSERT INTO keyword (keyword, volume, updated_at, difficulty) VALUES (?, ?, ?, ?)",
+            (keyword, 100, to_iso(now()), difficulty),
+        )
+    spec = views.table_for(db, View(views.KEYWORDS), sort="difficulty")
+    assert spec.keys == ["easy", "hard", "unknown"]  # unknown last, never first
