@@ -839,3 +839,73 @@ async def test_escape_is_never_disabled(seeded: sqlite3.Connection) -> None:
         await pilot.press("escape")
         await pilot.pause()
         assert not app.query_one("#command-row", Horizontal).display
+
+
+# ---------------------------------------------------------------------------
+# Layout: a capped keyword column and a right-hand inspector
+# ---------------------------------------------------------------------------
+
+
+async def test_the_keyword_column_takes_about_a_third(seeded: sqlite3.Connection) -> None:
+    """A forty-character keyword must not push every figure off the right edge."""
+    app = ZipfApp(seeded)
+    async with app.run_test(size=(160, 40)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#rows", DataTable)
+        keyword_column = next(iter(table.columns.values()))
+        assert keyword_column.width == table.size.width // 3
+
+
+async def test_a_long_keyword_does_not_widen_the_column(db: sqlite3.Connection) -> None:
+    db.execute(
+        "INSERT INTO keyword (keyword, volume, updated_at) VALUES (?, ?, ?)",
+        ("a really quite extraordinarily long keyword phrase", 100, "2026-08-01T00:00:00Z"),
+    )
+    app = ZipfApp(db)
+    async with app.run_test(size=(160, 40)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#rows", DataTable)
+        assert next(iter(table.columns.values())).width == table.size.width // 3
+
+
+async def test_a_table_too_narrow_to_cap_is_left_alone(seeded: sqlite3.Connection) -> None:
+    """Forcing an eighteen-wide column into a sixteen-wide table helps nobody."""
+    app = ZipfApp(seeded)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#rows", DataTable)
+        assert next(iter(table.columns.values())).width < 18
+
+
+async def test_only_the_keyword_column_is_capped(seeded: sqlite3.Connection) -> None:
+    """The ledger's first column is an id; a third of the width would be padding."""
+    app = ZipfApp(seeded)
+    async with app.run_test(size=(160, 40)) as pilot:
+        app.show_view(views.View(views.RESPONSES))
+        await pilot.pause()
+        table = app.query_one("#rows", DataTable)
+        assert next(iter(table.columns.values())).width < 18
+
+
+async def test_the_inspector_sits_beside_the_table(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test(size=(160, 40)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#rows", DataTable)
+        detail = app.query_one("#detail", Static)
+
+        assert detail.region.x > table.region.x  # to the right, not below
+        assert detail.region.y == table.region.y  # same row
+        assert detail.size.height == table.size.height  # full height beside it
+
+
+async def test_the_inspector_does_not_swallow_a_narrow_terminal(
+    seeded: sqlite3.Connection,
+) -> None:
+    """At eighty columns a fixed forty would leave the table narrower than it."""
+    app = ZipfApp(seeded)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#rows", DataTable)
+        detail = app.query_one("#detail", Static)
+        assert table.size.width > detail.size.width

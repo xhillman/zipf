@@ -22,7 +22,7 @@ without a terminal.
 from __future__ import annotations
 
 import sqlite3
-from typing import ClassVar
+from typing import ClassVar, Final
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
@@ -42,6 +42,13 @@ from zipf.services import budget as budget_service
 from zipf.tui import commands, views
 from zipf.tui.confirm import ConfirmModal
 from zipf.tui.views import TableSpec, View
+
+#: What fraction of the table the identifying column may take, and the floor it
+#: never drops below. A third leaves two thirds for the figures; the floor keeps
+#: the column readable in a narrow terminal, where truncating to nine characters
+#: would make every row look the same.
+_KEY_COLUMN_SHARE: Final = 3
+_KEY_COLUMN_MIN: Final = 18
 
 
 class JobActivity(Message):
@@ -131,6 +138,9 @@ class ZipfApp(App[None]):
         self._forensic = False
         # Where `escape` goes back to, for provenance and drilling.
         self._back: list[View] = []
+        # The keyword column's last computed ceiling, so a resize that does
+        # not change it does not rebuild the table.
+        self._key_width: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(id="status")
@@ -145,8 +155,13 @@ class ZipfApp(App[None]):
                 with Horizontal(id="head"):
                     yield Static(id="question")
                     yield Static(id="hint")
-                yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
-                yield Static(id="detail")
+                # The table and the inspector side by side. The inspector is
+                # about one row, so it belongs beside the rows rather than under
+                # them, where it competed with the table for vertical space and
+                # got six lines to say everything.
+                with Horizontal(id="workspace"):
+                    yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
+                    yield Static(id="detail")
                 yield Static(id="plan")
                 yield Input(placeholder="filter", id="filter")
                 # The headline rides on the same row as the thing being typed,
@@ -272,7 +287,10 @@ class ZipfApp(App[None]):
 
         self._spec = spec
         table.clear(columns=True)
-        table.add_columns(*spec.columns)
+        key_width = self._key_column_width(spec)
+        self._key_width = key_width
+        for index, label in enumerate(spec.columns):
+            table.add_column(label, width=key_width if index == 0 else None)
         for row in spec.rows:
             table.add_row(*row)
 
@@ -286,6 +304,46 @@ class ZipfApp(App[None]):
         # The footer offers keys per view, so it has to be re-asked whenever the
         # view changes rather than only at mount.
         self.refresh_bindings()
+
+    def _key_column_width(self, spec: TableSpec) -> int | None:
+        """A ceiling for the keyword column, or ``None`` to size it to content.
+
+        Only the identifying column holds free text of unbounded length — a
+        keyword can run to forty characters and push every figure off the right
+        edge, and the figures are what the table is for. A third of the width
+        leaves two thirds for them.
+
+        Returns ``None`` before the first layout, when the table has no size to
+        take a third of. ``on_resize`` corrects it once there is one.
+        """
+        if spec.key_kind != views.KEYWORD_KEY:
+            return None
+        available = self.query_one("#rows", DataTable).size.width
+        # Nothing to take a third of yet, or so little that a floor of eighteen
+        # would be wider than the whole table. Either way the honest answer is to
+        # let the column size itself rather than force an overflow.
+        if available < _KEY_COLUMN_MIN * 2:
+            return None
+        return max(_KEY_COLUMN_MIN, available // _KEY_COLUMN_SHARE)
+
+    def on_resize(self) -> None:
+        """Re-take a third of a width that just changed.
+
+        Deferred to after the next refresh because a ``Resize`` arrives *before*
+        the new layout is applied — read the table here and it still reports its
+        previous size, which on the first one is zero.
+        """
+        self.call_after_refresh(self._resize_key_column)
+
+    def _resize_key_column(self) -> None:
+        """Rebuild only when the third actually came out different.
+
+        A resize event per column dragged would otherwise rebuild the table for
+        every intermediate width.
+        """
+        if not self.is_running or self._key_width == self._key_column_width(self._spec):
+            return
+        self._reload_table()
 
     def _caption(self, spec: TableSpec) -> str:
         """The row count, plus whichever of filter, sort and marks is in force.

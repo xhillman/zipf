@@ -7,6 +7,7 @@ markup in stored data not being interpreted.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import timedelta
 
@@ -382,6 +383,11 @@ def test_an_unknown_response_id_renders_a_view_rather_than_raising(
 # ---------------------------------------------------------------------------
 
 
+def _plain(markup: str) -> str:
+    """The inspector's text without its markup, so assertions are about facts."""
+    return re.sub(r"\[/?[^\]]*\]", "", markup)
+
+
 def _priced(conn: sqlite3.Connection, keyword: str) -> int:
     raw_id = conn.execute(
         "INSERT INTO raw_response (capability, params_hash, params_json, body, cost_usd, "
@@ -409,29 +415,30 @@ def test_detail_shows_difficulty_and_intent(db: sqlite3.Connection) -> None:
     from zipf.services import browse
 
     _priced(db, "best crm software")
-    markup = views.detail_markup(browse.keyword_detail(db, "best crm software"), "x")
-    assert "difficulty 68" in markup
-    assert "commercial" in markup
-    assert "97%" in markup  # the confidence behind the label
+    pane = _plain(views.detail_markup(browse.keyword_detail(db, "best crm software"), "x"))
+    assert "difficulty 68" in pane
+    assert "commercial" in pane
+    assert "97%" in pane  # the confidence behind the label
 
 
 def test_detail_draws_the_monthly_series(db: sqlite3.Connection) -> None:
     from zipf.services import browse
 
     _priced(db, "best crm software")
-    markup = views.detail_markup(browse.keyword_detail(db, "best crm software"), "x")
-    assert "12mo" in markup
-    assert "1,000 to 12,000" in markup
+    pane = _plain(views.detail_markup(browse.keyword_detail(db, "best crm software"), "x"))
+    assert "12mo" in pane
+    assert "1,000 to 12,000" in pane
 
 
 def test_detail_names_what_the_source_cost(db: sqlite3.Connection) -> None:
     from zipf.services import browse
 
     raw_id = _priced(db, "best crm software")
-    markup = views.detail_markup(browse.keyword_detail(db, "best crm software"), "x")
-    assert f"from #{raw_id}" in markup
-    assert "labs.search_volume" in markup
-    assert "$0.01212" in markup
+    pane = _plain(views.detail_markup(browse.keyword_detail(db, "best crm software"), "x"))
+    assert f"#{raw_id}" in pane
+    assert "labs.search_volume" in pane
+    assert "$0.01212" in pane
+    assert "p opens it" in pane
 
 
 def test_a_flat_series_renders_flat() -> None:

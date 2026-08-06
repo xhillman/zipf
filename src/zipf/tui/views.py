@@ -705,39 +705,58 @@ def detail_markup(detail: dict[str, Any] | None, keyword: str) -> str:
     keywords come from a competitor's ranks and were never priced.
     """
     if detail is None:
-        return f"[dim]{keyword}[/]\n[dim]nothing priced for this keyword yet[/]"
+        return f"[bold]{keyword}[/]\n\n[dim]nothing priced for this keyword yet[/]"
 
-    lines = [f"[bold]{detail['keyword']}[/]"]
     volume = f"{detail['volume']:,}" if detail["volume"] is not None else ABSENT
     cpc = f"${detail['cpc']:.2f}" if detail["cpc"] is not None else ABSENT
-    # Difficulty is the only organic figure stored (migration 006). It sits next
-    # to volume and cpc deliberately: those two describe an advertising market,
-    # and reading them without it is how a keyword looks worth writing about
-    # right up until you see it is a 78.
+    # Difficulty is the only organic figure stored (migration 006). It sits with
+    # volume and cpc deliberately: those two describe an advertising market, and
+    # reading them without it is how a keyword looks worth writing about right up
+    # until you see it is a 78.
     difficulty = str(detail["difficulty"]) if detail.get("difficulty") is not None else ABSENT
-    lines.append(f"  volume {volume}   cpc {cpc}   difficulty {difficulty}")
-    lines.append(f"  {_intent(detail)}   [dim]updated {(detail['updated_at'] or '—')[:10]}[/]")
+
+    lines = [f"[bold]{detail['keyword']}[/]", ""]
+    lines.append(_pair("volume", volume))
+    lines.append(_pair("difficulty", difficulty))
+    lines.append(_pair("intent", _intent(detail)))
+    lines.append(_pair("cpc", cpc))
+    lines.append(_pair("updated", (detail["updated_at"] or "—")[:10]))
 
     if detail["ranks"]:
-        ranked = "  ".join(
-            f"{rank['domain']} [bold]#{rank['position']}[/]" for rank in detail["ranks"][:4]
-        )
-        lines.append(f"  ranks   {ranked}")
+        lines.append("")
+        for index, rank in enumerate(detail["ranks"][:3]):
+            label = "ranks" if index == 0 else ""
+            lines.append(_pair(label, f"{rank['domain']} [bold]#{rank['position']}[/]"))
     if detail.get("months"):
         series = [int(month["volume"]) for month in detail["months"]]
-        low, high = min(series), max(series)
-        lines.append(
-            f"  {len(series)}mo    [bold]{sparkline(series)}[/] [dim]{low:,} to {high:,}[/]"
-        )
+        lines.append("")
+        lines.append(_pair(f"{len(series)}mo", f"[bold]{sparkline(series)}[/]"))
+        lines.append(_pair("", f"[dim]{min(series):,} to {max(series):,}[/]"))
     if detail["gsc"]:
         gsc = detail["gsc"]
-        lines.append(
-            f"  yours   {gsc['clicks']:,} clicks · {gsc['impressions']:,} impressions "
-            f"· {plural(gsc['pages'], 'page')}"
-        )
+        lines.append("")
+        lines.append(_pair("yours", f"{gsc['clicks']:,} clicks"))
+        lines.append(_pair("", f"{gsc['impressions']:,} impressions"))
+        lines.append(_pair("", plural(gsc["pages"], "page")))
     if detail.get("raw_id") is not None:
-        lines.append(f"  [dim]{_provenance(detail)} · [bold]p[/] opens it[/]")
+        lines.append("")
+        lines.extend(_provenance(detail))
     return "\n".join(lines)
+
+
+#: Width of the label column in the inspector. Wide enough for "difficulty",
+#: which is the longest label any of these panes uses.
+_LABEL: Final = 11
+
+
+def _pair(label: str, value: str) -> str:
+    """One label-and-value row of the inspector.
+
+    The inspector is tall and narrow, so facts stack rather than running across.
+    A blank label continues the row above, which is how a list of ranks reads as
+    one fact rather than three.
+    """
+    return f"[dim]{label:<{_LABEL}}[/]{value}"
 
 
 def _intent(detail: dict[str, Any]) -> str:
@@ -756,19 +775,21 @@ def _intent(detail: dict[str, Any]) -> str:
     return f"{intent} [dim]{probability:.0%}[/]"
 
 
-def _provenance(detail: dict[str, Any]) -> str:
+def _provenance(detail: dict[str, Any]) -> list[str]:
     """Which stored response this keyword's figures came from, and what it cost."""
     source = detail.get("source")
     if source is None:
-        return f"from #{detail['raw_id']}"
+        return [_pair("source", f"#{detail['raw_id']}")]
     cost = "free" if not source["cost_usd"] else f"${source['cost_usd']:.5f}"
-    return (
-        f"from #{detail['raw_id']} · {source['capability']} · {cost} · {source['fetched_at'][:10]}"
-    )
+    return [
+        _pair("source", f"#{detail['raw_id']} · {cost}"),
+        _pair("", f"[dim]{source['capability']}[/]"),
+        _pair("", f"[dim]{source['fetched_at'][:10]} · [bold]p[/] opens it[/]"),
+    ]
 
 
 def response_markup(detail: dict[str, Any]) -> str:
-    """The detail pane for one stored response.
+    """The inspector for one stored response.
 
     States what it cost and that everything downstream can be rebuilt from it.
     That second fact is the reason the table is worth opening: it is the
@@ -776,13 +797,18 @@ def response_markup(detail: dict[str, Any]) -> str:
     """
     cost = "free" if not detail["cost_usd"] else f"${detail['cost_usd']:.5f}"
     lines = [
-        f"[bold]raw_response #{detail['id']}[/]  [dim]immutable bytes[/]",
-        f"  {detail['capability']}   {cost}   {detail['bytes']:,} bytes"
-        f"   [dim]params {detail['params_hash'][:12]}[/]",
-        f"  fetched {detail['fetched_at'][:16].replace('T', ' ')}",
+        f"[bold]raw_response #{detail['id']}[/]",
+        "[dim]immutable bytes[/]",
+        "",
+        _pair("capability", detail["capability"]),
+        _pair("cost", cost),
+        _pair("bytes", f"{detail['bytes']:,}"),
+        _pair("fetched", detail["fetched_at"][:16].replace("T", " ")),
+        _pair("params", f"[dim]{detail['params_hash'][:12]}[/]"),
     ]
     job = detail.get("job")
     if job is not None:
-        lines.append(f"  [dim]queued as job {job['id']} · {job['status']}[/]")
-    lines.append("  [dim]every row above can be rebuilt from these bytes · nothing re-fetched[/]")
+        lines.append(_pair("job", f"{job['id']} · {job['status']}"))
+    lines.append("")
+    lines.append("[dim]every row here can be rebuilt from these bytes · nothing re-fetched[/]")
     return "\n".join(lines)

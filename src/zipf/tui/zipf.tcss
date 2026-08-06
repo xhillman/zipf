@@ -58,16 +58,29 @@ $spend: #d78700;
     text-align: right;
 }
 
-/* The table takes whatever the detail pane does not. Fixed detail height keeps
- * the row cursor from jumping as you move between keywords with more or fewer
- * known surfaces. */
-#rows {
+#workspace {
     height: 1fr;
 }
 
+/* The table takes whatever the inspector does not. */
+#rows {
+    width: 1fr;
+    height: 1fr;
+}
+
+/* A share of the width rather than a fixed column: at 80 columns a fixed 40
+ * would leave the table narrower than the inspector beside it. The bounds keep
+ * it readable at both ends — never so narrow that "labs.domain_intersection"
+ * wraps, never so wide that it is mostly padding.
+ *
+ * Its width does not depend on the row under the cursor, so the table's columns
+ * do not shift as you move between keywords with more or fewer known surfaces. */
 #detail {
-    height: 6;
-    border-top: solid $panel;
+    width: 34%;
+    min-width: 26;
+    max-width: 44;
+    height: 1fr;
+    border-left: solid $panel;
     padding: 0 1;
 }
 
