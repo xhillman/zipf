@@ -1,26 +1,46 @@
-/* Two visual registers (PRD §9.1).
+/* Every colour here comes from the theme in `theme.py`, which is the only
+ * place a hex code is written. A theme variable resolves in both a CSS rule
+ * and a markup tag, which is why the palette lives there and not here. */
+/* Every surface is the terminal's own background, so whatever translucency it
+ * is configured with survives. Separation comes from rules and weight rather
+ * than from filled panels.
  *
- * Free actions use default theme styling. One colour is reserved exclusively
- * for spend, so anything that can cost money is recognisable before it is read.
- * Nothing that does not spend may use $spend — the register only carries
- * meaning while it stays reserved.
- */
-$spend: #d78700;
+ * `$background` rather than `transparent`: the latter is transparent *black*
+ * and Textual composites it to opaque black before emitting. See `theme.py`. */
+Screen {
+    background: $background;
+    color: $ink;
+}
 
 #status {
     height: 3;
-    background: $panel;
+    background: $background;
 }
 
-/* Takes the slack, so the balance beside it is pushed to the right edge. */
+/* The brand and the balance take equal shares of whatever the blocks leave, so
+ * the blocks land in the true middle of the bar — and stay there. Sizing either
+ * side to its own text would move the blocks every time the title changed
+ * length, which is exactly what cycling sections does. */
 #brand {
     width: 1fr;
     padding: 1 1;
-    color: red;
 }
 
-#balance {
+#sections {
     width: auto;
+    padding: 1 0;
+}
+
+#sections > * {
+    border: solid red;
+}
+
+/* An equal share, but never less than the readout needs. Below about a hundred
+ * columns there is not enough bar for both a centred strip and an intact
+ * balance, and a truncated figure is worse than an off-centre one. */
+#balance {
+    width: 1fr;
+    min-width: 38;
     padding: 1 1;
     text-align: right;
 }
@@ -31,7 +51,7 @@ $spend: #d78700;
 
 #side {
     width: 24;
-    border-right: solid $panel;
+    border-right: solid $dim 30%;
 }
 
 #sidebar {
@@ -42,7 +62,7 @@ $spend: #d78700;
 /* Fixed height so a finished job appearing never resizes the tree above it. */
 #jobs {
     height: 9;
-    border-top: solid $panel;
+    border-top: solid $dim 30%;
     padding: 0 1;
 }
 
@@ -54,7 +74,7 @@ $spend: #d78700;
  * orientation, not content, and a second line would push the table down. */
 #head {
     height: 1;
-    background: $panel;
+    background: $background;
 }
 
 #question {
@@ -92,8 +112,8 @@ $spend: #d78700;
     width: 34%;
     min-width: 26;
     max-width: 44;
-    height: 1fr;
-    border-left: solid $panel;
+    height: auto;
+    border: solid $violet 55%;
     padding: 0 1;
 }
 
@@ -103,7 +123,8 @@ $spend: #d78700;
     height: 1;
     border: none;
     padding: 0 1;
-    background: $panel;
+    background: $background;
+    color: $ink;
 }
 
 /* The command bar is the only route to a paid action, so it wears the spend
@@ -116,7 +137,7 @@ $spend: #d78700;
 /* One row, so the price and the command being typed are read together. */
 #command-row {
     height: 1;
-    background: $panel;
+    background: $background;
 }
 
 /* The verdict rides on the right of the bar: what this command would do, in one
@@ -127,7 +148,7 @@ $spend: #d78700;
     max-width: 60%;
     padding: 0 1;
     text-align: right;
-    background: $panel;
+    background: $background;
 }
 
 #verdict.-spend {
@@ -136,15 +157,15 @@ $spend: #d78700;
 }
 
 #verdict.-free {
-    color: $success;
+    color: $free;
 }
 
 #verdict.-error {
-    color: $warning;
+    color: $alert;
 }
 
 #verdict.-info, #verdict.-idle {
-    color: $text-muted;
+    color: $dim;
 }
 
 /* What the typed command would do, priced on every keystroke.
@@ -159,7 +180,7 @@ $spend: #d78700;
     height: auto;
     max-height: 6;
     padding: 0 1;
-    background: $panel;
+    background: $background;
 }
 
 #plan.-spend {
@@ -167,15 +188,15 @@ $spend: #d78700;
 }
 
 #plan.-free {
-    color: $success;
+    color: $free;
 }
 
 #plan.-error {
-    color: $warning;
+    color: $alert;
 }
 
 #plan.-info, #plan.-idle {
-    color: $text-muted;
+    color: $dim;
 }
 
 ConfirmModal {
@@ -186,7 +207,7 @@ ConfirmModal {
     width: 52;
     height: auto;
     border: round $spend;
-    background: $surface;
+    background: $background;
     padding: 1 2;
 }
 
@@ -199,4 +220,88 @@ ConfirmModal {
 #confirm-keys {
     margin-top: 1;
     text-align: right;
+}
+
+/* ------------------------------------------------------------------ table */
+
+/* Flat rows with a rule under the header, rather than zebra banding. Striping
+ * fills every other row with a colour that means nothing, which on a
+ * transparent background reads as the terminal showing through unevenly. */
+DataTable {
+    scrollbar-size: 1 1;
+}
+
+DataTable > .datatable--header {
+    background: $background;
+    color: $dim;
+    text-style: none;
+}
+
+DataTable > .datatable--cursor {
+    background: $violet 30%;
+    color: $ink;
+}
+
+DataTable > .datatable--hover {
+    background: $violet 25%;
+}
+
+/* The identifying column of the row under the cursor, which is the one the
+ * inspector beside it is describing. */
+DataTable > .datatable--fixed {
+    background: $background;
+    color: $dim;
+}
+
+/* ------------------------------------------------------------------- tree */
+
+/* `color` is not inherited in Textual CSS, and with an ANSI background Textual
+ * cannot compute a contrasting default — so both of these fall back to the
+ * terminal's foreground unless told otherwise. */
+Tree {
+    background: $background;
+    color: $ink;
+}
+
+Tree > .tree--guides, Tree > .tree--guides-hover, Tree > .tree--guides-selected {
+    color: $dim 40%;
+}
+
+Tree > .tree--cursor {
+    background: $violet 18%;
+    color: $ink;
+}
+
+Tree > .tree--highlight {
+    background: $violet 10%;
+}
+
+/* ----------------------------------------------------------------- footer */
+
+Footer {
+    background: $background;
+}
+
+Footer > .footer-key--key {
+    background: $background;
+    color: $cyan;
+}
+
+Footer > .footer-key--description {
+    background: $background;
+    color: $dim;
+}
+
+/* A rule under the header block, replacing the filled bar that used to
+ * separate it from the table. */
+#head {
+    border-bottom: solid $dim 25%;
+}
+
+#status {
+    border-bottom: solid $dim 25%;
+}
+
+#command-row {
+    border-top: solid $dim 25%;
 }

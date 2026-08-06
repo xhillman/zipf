@@ -517,3 +517,41 @@ def test_difficulty_sorts_easiest_first(db: sqlite3.Connection) -> None:
         )
     spec = views.table_for(db, View(views.KEYWORDS), sort="difficulty")
     assert spec.keys == ["easy", "hard", "unknown"]  # unknown last, never first
+
+
+# ---------------------------------------------------------------------------
+# Section blocks
+# ---------------------------------------------------------------------------
+
+
+def test_sections_cycle_and_wrap() -> None:
+    assert views.next_section("explore") == "research"
+    assert views.next_section("research") == "data"
+    assert views.next_section("data") == "explore"
+
+
+def test_an_unknown_section_lands_on_the_first() -> None:
+    """Reached only from corrupt state, but it must not raise mid-render."""
+    assert views.next_section("nonsense") == "explore"
+
+
+def test_exactly_one_block_is_filled() -> None:
+    blocks = views.section_blocks("research")
+    assert blocks.count("[reverse") == 1
+    assert "[reverse bold $violet] research [/]" in blocks
+    assert "[$dim] explore [/]" in blocks
+    assert "[$dim] data [/]" in blocks
+
+
+def test_blocks_keep_their_width_whichever_is_active() -> None:
+    """Otherwise the blocks slide along the bar every time you cycle."""
+    widths = {len(_plain(views.section_blocks(active))) for active in views.SECTIONS}
+    assert len(widths) == 1
+
+
+def test_the_title_names_the_view_only_in_explore() -> None:
+    """A section with nothing behind it must not claim to be showing a view."""
+    view = View(views.KEYWORDS)
+    assert "keyword explorer" in views.title_line(view, "explore")
+    assert _plain(views.title_line(view, "research")) == "zipf / research"
+    assert _plain(views.title_line(view, "data")) == "zipf / data"

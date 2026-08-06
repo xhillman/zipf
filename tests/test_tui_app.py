@@ -909,3 +909,101 @@ async def test_the_inspector_does_not_swallow_a_narrow_terminal(
         table = app.query_one("#rows", DataTable)
         detail = app.query_one("#detail", Static)
         assert table.size.width > detail.size.width
+
+
+# ---------------------------------------------------------------------------
+# Section blocks in the title bar
+# ---------------------------------------------------------------------------
+
+
+async def test_explore_is_selected_on_startup(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "keyword explorer" in str(app.query_one("#brand", Static).render())
+        blocks = app.query_one("#sections", Static)
+        assert "explore" in str(blocks.render())
+
+
+async def test_tab_cycles_the_sections_and_retitles(seeded: sqlite3.Connection) -> None:
+    """Tab is bound with priority because the screen would otherwise take it
+    for focus traversal before the app ever sees it."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        brand = app.query_one("#brand", Static)
+
+        await pilot.press("tab")
+        assert "research" in str(brand.render())
+
+        await pilot.press("tab")
+        assert "data" in str(brand.render())
+
+        await pilot.press("tab")
+        assert "keyword explorer" in str(brand.render())  # wrapped
+
+
+async def test_cycling_a_section_changes_nothing_else(seeded: sqlite3.Connection) -> None:
+    """The sections beyond explore have no views behind them yet, so moving the
+    table to something unrelated would be a worse answer than leaving it."""
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        table = app.query_one("#rows", DataTable)
+        before = (
+            table.row_count,
+            [str(column.label) for column in table.columns.values()],
+            str(app.query_one("#question", Static).render()),
+            app.sub_title,
+        )
+
+        await pilot.press("tab")
+        await pilot.pause()
+
+        assert (
+            table.row_count,
+            [str(column.label) for column in table.columns.values()],
+            str(app.query_one("#question", Static).render()),
+            app.sub_title,
+        ) == before
+
+
+async def test_the_blocks_do_not_move_when_the_title_changes_length(
+    seeded: sqlite3.Connection,
+) -> None:
+    """ "keyword explorer" and "data" are different lengths.
+
+    Sizing the brand to its own text moved the blocks along the bar every time
+    you cycled, which made the one thing Tab is for look like a glitch.
+    """
+    app = ZipfApp(seeded)
+    async with app.run_test(size=(140, 30)) as pilot:
+        await pilot.pause()
+        blocks = app.query_one("#sections", Static)
+        positions = set()
+        for _ in range(len(views.SECTIONS)):
+            positions.add((blocks.region.x, blocks.region.width))
+            await pilot.press("tab")
+            await pilot.pause()
+        assert len(positions) == 1
+
+
+async def test_the_blocks_sit_in_the_middle_of_the_bar(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test(size=(140, 30)) as pilot:
+        await pilot.pause()
+        blocks = app.query_one("#sections", Static)
+        bar = app.query_one("#status")
+        offset = abs((blocks.region.x + blocks.region.width / 2) - bar.size.width / 2)
+        assert offset <= 1  # a strip of odd width cannot be exact in an even bar
+
+
+async def test_a_narrow_bar_keeps_the_balance_whole(seeded: sqlite3.Connection) -> None:
+    """Below about a hundred columns there is not room for both.
+
+    A truncated balance is worse than an off-centre strip: one is a number you
+    cannot read, the other is a strip that is not quite in the middle.
+    """
+    app = ZipfApp(seeded)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        balance = app.query_one("#balance", Static)
+        assert balance.region.width >= len(str(balance.render()))

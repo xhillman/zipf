@@ -41,6 +41,7 @@ from zipf.services import browse
 from zipf.services import budget as budget_service
 from zipf.tui import commands, views
 from zipf.tui.confirm import ConfirmModal
+from zipf.tui.theme import ZIPF_THEME
 from zipf.tui.views import TableSpec, View
 
 #: What fraction of the table the identifying column may take, and the floor it
@@ -73,6 +74,10 @@ class ZipfApp(App[None]):
     # showing for the row you are on. Hiding a key outright would make it
     # undiscoverable; showing all nine at once is a wall nobody reads.
     BINDINGS: ClassVar[list[BindingType]] = [
+        # `priority` because the screen binds tab to focus-next and would
+        # otherwise swallow it before the app sees it. `shift+tab` is left alone,
+        # so focus traversal — and with it the sidebar — stays reachable.
+        Binding("tab", "next_section", "section", priority=True),
         Binding("space", "mark", "mark"),
         Binding("p", "source", "source"),
         Binding("s", "sort", "sort"),
@@ -83,6 +88,15 @@ class ZipfApp(App[None]):
         Binding("escape", "escape", "back"),
         Binding("q", "quit", "quit"),
     ]
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        """Make the palette's names known to the stylesheet parser.
+
+        ``zipf.tcss`` is read during startup, before ``on_mount`` can register
+        the theme, so without this every ``$cyan`` in it is an undefined
+        variable at parse time and the app refuses to start.
+        """
+        return dict(ZIPF_THEME.variables)
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Which keys the footer offers for whatever is on screen.
@@ -112,7 +126,11 @@ class ZipfApp(App[None]):
         budget: Budget | None = None,
         own_domain: str | None = None,
     ) -> None:
-        super().__init__()
+        # `ansi_color` keeps ANSI colours native. Without it Textual installs
+        # an `ANSIToTruecolor` filter that rewrites the theme's `ansi_default`
+        # background into a concrete RGB before it reaches the terminal —
+        # which paints every cell and defeats the transparency entirely.
+        super().__init__(ansi_color=True)
         self._conn = conn
         # Without a write handle the app is a reader: every `:` command that
         # would enqueue or fetch refuses rather than failing inside SQLite.
@@ -141,12 +159,17 @@ class ZipfApp(App[None]):
         # The keyword column's last computed ceiling, so a resize that does
         # not change it does not rebuild the table.
         self._key_width: int | None = None
+        # Which section of the interface is selected. Only the title reads it
+        # today — the sections other than `explore` have nothing behind them
+        # yet, and cycling to one deliberately leaves the view alone.
+        self._section = views.SECTIONS[0]
 
     def compose(self) -> ComposeResult:
         # Where you are on the left, what you have and what is left on the
         # right. Two widgets so each can align to its own edge.
         with Horizontal(id="status"):
             yield Static(id="brand")
+            yield Static(id="sections")
             yield Static(id="balance")
         with Horizontal(id="body"):
             with Vertical(id="side"):
@@ -164,7 +187,7 @@ class ZipfApp(App[None]):
                 # them, where it competed with the table for vertical space and
                 # got six lines to say everything.
                 with Horizontal(id="workspace"):
-                    yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
+                    yield DataTable(id="rows", cursor_type="row")
                     yield Static(id="detail")
                 yield Static(id="plan")
                 yield Input(placeholder="filter", id="filter")
@@ -177,6 +200,10 @@ class ZipfApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
+        # Registered before anything renders, so no widget is ever painted
+        # in the stock theme first.
+        self.register_theme(ZIPF_THEME)
+        self.theme = ZIPF_THEME.name
         self.query_one("#filter", Input).display = False
         self.query_one("#command-row", Horizontal).display = False
         self.query_one("#plan", Static).display = False
@@ -303,7 +330,7 @@ class ZipfApp(App[None]):
             table.move_cursor(row=cursor)
 
         self.sub_title = self._caption(spec)
-        self.query_one("#brand", Static).update(views.title_line(self._view))
+        self._show_title()
         self._show_question(spec)
         self._show_detail(cursor)
         # The footer offers keys per view, so it has to be re-asked whenever the
@@ -368,6 +395,21 @@ class ZipfApp(App[None]):
         if self._marked and spec.key_kind == views.KEYWORD_KEY:
             parts.append(f"{len(self._marked)} marked")
         return " · ".join(parts)
+
+    def _show_title(self) -> None:
+        """Redraw the title bar: where you are, and which section holds it."""
+        self.query_one("#brand", Static).update(views.title_line(self._view, self._section))
+        self.query_one("#sections", Static).update(views.section_blocks(self._section))
+
+    def action_next_section(self) -> None:
+        """Move to the next section.
+
+        Changes the title and the selector and nothing else. The sections beyond
+        ``explore`` have no views behind them yet, and moving the table to
+        something unrelated would be a worse answer than leaving it where it is.
+        """
+        self._section = views.next_section(self._section)
+        self._show_title()
 
     def _show_question(self, spec: TableSpec) -> None:
         """The question this view answers, and the command it makes typeable.

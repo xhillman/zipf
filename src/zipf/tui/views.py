@@ -67,6 +67,11 @@ QUESTIONS: Final[dict[str, str]] = {
     RESPONSE: "What did response #{arg} produce?",
 }
 
+#: The three sections the interface is organised into. Only ``explore`` has views
+#: behind it today; the other two are named so the shape is visible before the
+#: work that fills them lands, and so the title can say which one you are in.
+SECTIONS: Final[tuple[str, ...]] = ("explore", "research", "data")
+
 #: What the title bar calls each view. Short, because it shares one line with
 #: the balance — the question below it is where a view explains itself.
 NAMES: Final[dict[str, str]] = {
@@ -643,9 +648,38 @@ def view_name(view: View) -> str:
     return name.format(arg=view.arg) if view.arg else name.partition(" · {arg}")[0]
 
 
-def title_line(view: View) -> str:
-    """The left of the title bar: the tool, and where in it you are."""
-    return f"[bold]zipf[/] [dim]/[/] {view_name(view)}"
+def next_section(current: str) -> str:
+    """The section after this one, wrapping. Unknown input starts at the first."""
+    if current not in SECTIONS:
+        return SECTIONS[0]
+    return SECTIONS[(SECTIONS.index(current) + 1) % len(SECTIONS)]
+
+
+def section_blocks(active: str) -> str:
+    """The section selector: three blocks, one of them filled.
+
+    The active block is inverted rather than coloured. Every hue this interface
+    uses already means something — ``$spend`` means money — and a selector that
+    borrowed one would dilute the register it borrowed.
+
+    Every block is padded identically whether or not it is active, so the ones
+    beside it do not shift along the bar as you cycle through them.
+    """
+    return " ".join(
+        f"[reverse bold $violet] {name} [/]" if name == active else f"[$dim] {name} [/]"
+        for name in SECTIONS
+    )
+
+
+def title_line(view: View, section: str = SECTIONS[0]) -> str:
+    """The left of the title bar: the tool, and where in it you are.
+
+    Only ``explore`` has views behind it, so it names the view on screen. The
+    other two name themselves, because naming a view they do not own yet would
+    say the section had changed something when it has not.
+    """
+    where = view_name(view) if section == SECTIONS[0] else section
+    return f"[bold]zipf[/] [$dim]/[/] [$cyan]{where}[/]"
 
 
 def status_line(state: BudgetStatus, totals: browse.CacheCounts) -> str:
@@ -660,9 +694,9 @@ def status_line(state: BudgetStatus, totals: browse.CacheCounts) -> str:
     already on screen is the noise the PRD rules out.
     """
     return (
-        f"{plural(totals.keywords, 'keyword')}  "
-        f"[bold]${state.effective_limit:.2f}[/] left "
-        f"{meter(state.used_fraction)}"
+        f"[$cyan]{plural(totals.keywords, 'keyword')}[/] [$dim]·[/] "
+        f"[$cyan bold]${state.effective_limit:.2f}[/] [$dim]left[/] "
+        f"[$cyan]{meter(state.used_fraction)}[/]"
     )
 
 
@@ -734,7 +768,7 @@ def detail_markup(detail: dict[str, Any] | None, keyword: str) -> str:
     keywords come from a competitor's ranks and were never priced.
     """
     if detail is None:
-        return f"[bold]{keyword}[/]\n\n[dim]nothing priced for this keyword yet[/]"
+        return f"[$violet bold]{keyword}[/]\n\n[$dim]nothing priced for this keyword yet[/]"
 
     volume = f"{detail['volume']:,}" if detail["volume"] is not None else ABSENT
     cpc = f"${detail['cpc']:.2f}" if detail["cpc"] is not None else ABSENT
@@ -744,7 +778,7 @@ def detail_markup(detail: dict[str, Any] | None, keyword: str) -> str:
     # until you see it is a 78.
     difficulty = str(detail["difficulty"]) if detail.get("difficulty") is not None else ABSENT
 
-    lines = [f"[bold]{detail['keyword']}[/]", ""]
+    lines = [f"[$violet bold]{detail['keyword']}[/]", ""]
     lines.append(_pair("volume", volume))
     lines.append(_pair("difficulty", difficulty))
     lines.append(_pair("intent", _intent(detail)))
@@ -785,7 +819,7 @@ def _pair(label: str, value: str) -> str:
     A blank label continues the row above, which is how a list of ranks reads as
     one fact rather than three.
     """
-    return f"[dim]{label:<{_LABEL}}[/]{value}"
+    return f"[$cyan]{label:<{_LABEL}}[/]{value}"
 
 
 def _intent(detail: dict[str, Any]) -> str:
@@ -826,8 +860,8 @@ def response_markup(detail: dict[str, Any]) -> str:
     """
     cost = "free" if not detail["cost_usd"] else f"${detail['cost_usd']:.5f}"
     lines = [
-        f"[bold]raw_response #{detail['id']}[/]",
-        "[dim]immutable bytes[/]",
+        f"[$violet bold]raw_response #{detail['id']}[/]",
+        "[$dim]immutable bytes[/]",
         "",
         _pair("capability", detail["capability"]),
         _pair("cost", cost),
