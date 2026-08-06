@@ -161,27 +161,50 @@ def test_status_line_leads_with_the_effective_limit() -> None:
         responses=49,
         jobs_pending=2,
     )
-    line = views.status_line(state, totals)
+    line = _plain(views.status_line(state, totals))
     assert "$5.00 left" in line  # the balance, not the $18.00 ceiling remainder
-    assert "1,204 kw" in line
-    assert "2 jobs" in line
+    assert "1,204 keywords" in line
+    assert "▓" in line  # the meter stays
 
 
-def test_status_line_omits_jobs_when_there_are_none() -> None:
-    """Default to silence: a zero is not worth a segment of the readout."""
+def test_status_line_does_not_repeat_what_is_already_on_screen() -> None:
+    """The sidebar counts domains and the jobs pane shows jobs.
+
+    A readout that restates them spends the one line it has on things the eye
+    can already reach, which is the noise the PRD rules out.
+    """
     state = BudgetStatus(
         spent=0.0, ceiling=20.0, remaining=20.0, threshold=0.0, balance=None, balance_age=None
     )
     totals = CacheCounts(
-        keywords=0,
-        domains=0,
-        gap_pairs=0,
+        keywords=12,
+        domains=4,
+        gap_pairs=2,
         gsc_queries=0,
         observations=0,
-        responses=0,
-        jobs_pending=0,
+        responses=9,
+        jobs_pending=3,
     )
-    assert "job" not in views.status_line(state, totals)
+    line = views.status_line(state, totals)
+    assert "12 keywords" in line
+    assert "domain" not in line
+    assert "job" not in line
+
+
+def test_the_title_bar_says_where_you_are() -> None:
+    assert "keyword explorer" in views.title_line(View(views.KEYWORDS))
+    assert "refresh planner" in views.title_line(View(views.STALE))
+    assert "acquisition ledger" in views.title_line(View(views.RESPONSES))
+
+
+def test_a_view_with_an_argument_names_it() -> None:
+    assert views.view_name(View(views.DOMAIN, "ahrefs.com")) == "domain · ahrefs.com"
+    assert views.view_name(View(views.RESPONSE, "184")) == "response #184"
+
+
+def test_a_view_with_no_argument_drops_the_slot() -> None:
+    """Reached from the sidebar rather than a row, so there is nothing to name."""
+    assert views.view_name(View(views.DOMAIN)) == "domain"
 
 
 def test_sort_cycles_wrap_and_start_at_the_default() -> None:

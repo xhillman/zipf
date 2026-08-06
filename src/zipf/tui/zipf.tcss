@@ -8,8 +8,21 @@
 $spend: #d78700;
 
 #status {
-    height: 1;
+    height: 3;
     background: $panel;
+}
+
+/* Takes the slack, so the balance beside it is pushed to the right edge. */
+#brand {
+    width: 1fr;
+    padding: 1 1;
+    color: red;
+}
+
+#balance {
+    width: auto;
+    padding: 1 1;
+    text-align: right;
 }
 
 #body {

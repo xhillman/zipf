@@ -71,7 +71,7 @@ async def test_boots_on_an_empty_cache(db: sqlite3.Connection) -> None:
     app = ZipfApp(db)
     async with app.run_test() as pilot:
         assert app.query_one("#rows", DataTable).row_count == 0
-        assert "0 kw" in str(app.query_one("#status", Static).render())
+        assert "0 keywords" in str(app.query_one("#balance", Static).render())
         await pilot.press("q")
     assert app.return_value is None
 
@@ -182,7 +182,7 @@ async def test_opening_makes_no_network_call(seeded: sqlite3.Connection) -> None
     """
     app = ZipfApp(seeded)
     async with app.run_test():
-        assert "left" in str(app.query_one("#status", Static).render())
+        assert "left" in str(app.query_one("#balance", Static).render())
 
 
 def test_missing_database_names_its_fix(tmp_path: Path) -> None:
@@ -340,7 +340,7 @@ async def test_reload_makes_no_network_call(seeded: sqlite3.Connection) -> None:
     async with app.run_test() as pilot:
         await pilot.press("r")
         await pilot.pause()
-        assert "left" in str(app.query_one("#status", Static).render())
+        assert "left" in str(app.query_one("#balance", Static).render())
 
 
 async def _type(pilot: object, text: str) -> None:

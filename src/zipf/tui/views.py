@@ -67,6 +67,21 @@ QUESTIONS: Final[dict[str, str]] = {
     RESPONSE: "What did response #{arg} produce?",
 }
 
+#: What the title bar calls each view. Short, because it shares one line with
+#: the balance — the question below it is where a view explains itself.
+NAMES: Final[dict[str, str]] = {
+    KEYWORDS: "keyword explorer",
+    DOMAINS: "domains",
+    DOMAIN: "domain · {arg}",
+    GAPS: "gaps",
+    GAP: "gap",
+    STALE: "refresh planner",
+    GSC: "search console",
+    VISIBILITY: "visibility",
+    RESPONSES: "acquisition ledger",
+    RESPONSE: "response #{arg}",
+}
+
 #: Appended to the header of whichever column the table is sorted by. Stripped
 #: again by ``sort_for_column``, so clicking a sorted header still resolves.
 SORT_MARK: Final = " ↓"
@@ -622,18 +637,32 @@ def _visibility_placeholder() -> TableSpec:
     )
 
 
-def status_line(state: BudgetStatus, totals: browse.CacheCounts) -> str:
-    """The persistent readout: what is left to spend, and what is stored.
+def view_name(view: View) -> str:
+    """What the title bar calls this view."""
+    name = NAMES.get(view.kind, view.kind)
+    return name.format(arg=view.arg) if view.arg else name.partition(" · {arg}")[0]
 
-    Leads with the effective limit for the same reason ``zipf budget`` does —
-    two limits shown as equals read as confusion. The meter is the same function
-    the CLI uses, so the bar cannot disagree between the two shells.
+
+def title_line(view: View) -> str:
+    """The left of the title bar: the tool, and where in it you are."""
+    return f"[bold]zipf[/] [dim]/[/] {view_name(view)}"
+
+
+def status_line(state: BudgetStatus, totals: browse.CacheCounts) -> str:
+    """The right of the title bar: what is stored, and what is left to spend.
+
+    Leads the money with the effective limit for the same reason ``zipf budget``
+    does — two limits shown as equals read as confusion. The meter is the same
+    function the CLI uses, so the bar cannot disagree between the two shells.
+
+    Domains and pending jobs are deliberately absent: the sidebar counts the
+    first and the jobs pane shows the second, and a readout that repeats what is
+    already on screen is the noise the PRD rules out.
     """
-    pending = f" · [bold]{plural(totals.jobs_pending, 'job')}[/]" if totals.jobs_pending else ""
     return (
-        f" [bold]zipf[/]  ${state.effective_limit:.2f} left "
-        f"{meter(state.used_fraction)}  "
-        f"[dim]{totals.keywords:,} kw · {plural(totals.domains, 'domain')}[/]{pending}"
+        f"{plural(totals.keywords, 'keyword')}  "
+        f"[bold]${state.effective_limit:.2f}[/] left "
+        f"{meter(state.used_fraction)}"
     )
 
 

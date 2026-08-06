@@ -143,7 +143,11 @@ class ZipfApp(App[None]):
         self._key_width: int | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static(id="status")
+        # Where you are on the left, what you have and what is left on the
+        # right. Two widgets so each can align to its own edge.
+        with Horizontal(id="status"):
+            yield Static(id="brand")
+            yield Static(id="balance")
         with Horizontal(id="body"):
             with Vertical(id="side"):
                 yield Tree("cache", id="sidebar")
@@ -299,6 +303,7 @@ class ZipfApp(App[None]):
             table.move_cursor(row=cursor)
 
         self.sub_title = self._caption(spec)
+        self.query_one("#brand", Static).update(views.title_line(self._view))
         self._show_question(spec)
         self._show_detail(cursor)
         # The footer offers keys per view, so it has to be re-asked whenever the
@@ -415,7 +420,7 @@ class ZipfApp(App[None]):
         bar that blocks on a vendor round-trip contradicts that.
         """
         state = await budget_service.status(self._conn, self._budget, refresh=False)
-        self.query_one("#status", Static).update(
+        self.query_one("#balance", Static).update(
             views.status_line(state, browse.counts(self._conn))
         )
 
