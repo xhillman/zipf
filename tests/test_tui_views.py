@@ -138,7 +138,7 @@ def test_detail_gathers_volume_and_ranks(seeded: sqlite3.Connection) -> None:
     detail = browse.keyword_detail(seeded, "fresh keyword")
     markup = views.detail_markup(detail, "fresh keyword")
     assert "8,100" in markup
-    assert "ahrefs.com [bold]#14[/]" in markup
+    assert "ahrefs.com [$bright bold]#14[/]" in markup
 
 
 def test_status_line_leads_with_the_effective_limit() -> None:
@@ -518,8 +518,8 @@ def test_an_unknown_section_lands_on_the_first() -> None:
 
 def test_exactly_one_block_is_filled() -> None:
     blocks = views.section_blocks("research")
-    assert blocks.count("[reverse") == 1
-    assert "[reverse bold $violet] research [/]" in blocks
+    assert blocks.count("on $panel") == 1
+    assert "[$bright on $panel bold] research [/]" in blocks
     assert "[$dim] explore [/]" in blocks
     assert "[$dim] data [/]" in blocks
 
@@ -532,9 +532,9 @@ def test_blocks_keep_their_width_whichever_is_active() -> None:
 
 def test_explore_mode_blocks_number_and_fill_the_active_option() -> None:
     blocks = views.explore_mode_blocks(views.EXPLORE_WATCHLIST)
-    assert blocks.count("[reverse") == 1
+    assert blocks.count("on $panel") == 1
     assert "[$dim] 1 All [/]" in blocks
-    assert "[reverse bold $violet] 2 Watchlist [/]" in blocks
+    assert "[$bright on $panel bold] 2 Watchlist [/]" in blocks
 
 
 def test_the_title_names_the_view_only_in_explore() -> None:

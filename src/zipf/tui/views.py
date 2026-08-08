@@ -25,7 +25,7 @@ from rich.text import Text
 from zipf import capabilities
 from zipf.clock import as_days, from_iso, now
 from zipf.format import ABSENT, meter, plural
-from zipf.jobs.describe import job_subject, status_style
+from zipf.jobs.describe import job_subject
 from zipf.services import browse, volume
 from zipf.services import gap as gap_service
 from zipf.services.budget import BudgetStatus
@@ -668,15 +668,14 @@ def next_section(current: str) -> str:
 def section_blocks(active: str) -> str:
     """The section selector: three blocks, one of them filled.
 
-    The active block is inverted rather than coloured. Every hue this interface
-    uses already means something — ``$spend`` means money — and a selector that
-    borrowed one would dilute the register it borrowed.
+    The active block uses the neutral panel and bright text. Every hue this
+    interface uses already means something, so a selector must not borrow one.
 
     Every block is padded identically whether or not it is active, so the ones
     beside it do not shift along the bar as you cycle through them.
     """
     return " ".join(
-        f"[reverse bold $violet] {name} [/]" if name == active else f"[$dim] {name} [/]"
+        f"[$bright on $panel bold] {name} [/]" if name == active else f"[$dim] {name} [/]"
         for name in SECTIONS
     )
 
@@ -685,7 +684,7 @@ def explore_mode_blocks(active: str) -> str:
     """The numbered All/Watchlist selector shown inside Explore."""
     labels = ((EXPLORE_ALL, "1 All"), (EXPLORE_WATCHLIST, "2 Watchlist"))
     return " ".join(
-        f"[reverse bold $violet] {label} [/]" if mode == active else f"[$dim] {label} [/]"
+        f"[$bright on $panel bold] {label} [/]" if mode == active else f"[$dim] {label} [/]"
         for mode, label in labels
     )
 
@@ -698,7 +697,7 @@ def title_line(view: View, section: str = SECTIONS[0]) -> str:
     say the section had changed something when it has not.
     """
     where = view_name(view) if section == SECTIONS[0] else section
-    return f"[bold]zipf[/] [$dim]/[/] [$cyan]{where}[/]"
+    return f"[$bright bold]zipf[/] [$dim]/[/] [$bright]{where}[/]"
 
 
 def status_line(state: BudgetStatus, keywords: int) -> str:
@@ -713,9 +712,9 @@ def status_line(state: BudgetStatus, keywords: int) -> str:
     second.
     """
     return (
-        f"[$cyan]{plural(keywords, 'keyword')}[/] [$dim]·[/] "
-        f"[$cyan bold]${state.effective_limit:.2f}[/] [$dim]left[/] "
-        f"[$cyan]{meter(state.used_fraction)}[/]"
+        f"{plural(keywords, 'keyword')} [$dim]·[/] "
+        f"[$bright bold]${state.effective_limit:.2f}[/] [$dim]left[/] "
+        f"{meter(state.used_fraction)}"
     )
 
 
@@ -729,6 +728,14 @@ _JOB_MARKS: Final[dict[str, str]] = {
     "cancelled": "◌",
 }
 
+_JOB_STYLES: Final[dict[str, str]] = {
+    "done": "$free",
+    "queued": "$spend",
+    "running": "$spend",
+    "failed": "$dim",
+    "cancelled": "$dim",
+}
+
 
 def jobs_markup(rows: Sequence[sqlite3.Row]) -> str:
     """The jobs pane: what is queued, what is running, what it cost.
@@ -738,13 +745,13 @@ def jobs_markup(rows: Sequence[sqlite3.Row]) -> str:
     usability pass fixed in ``jobs list`` and would be inherited here.
     """
     if not rows:
-        return "[dim]no jobs[/]"
+        return "[$dim]no jobs[/]"
 
-    lines = ["[bold]jobs[/]"]
+    lines = ["[$bright bold]jobs[/]"]
     for row in rows:
         params = json.loads(row["params_json"])
         status = row["status"]
-        style = status_style(status)
+        style = _JOB_STYLES.get(status, "$dim")
 
         # An estimate and a charge are different facts, so the tilde stays until
         # the vendor has said what it actually cost.
@@ -753,7 +760,7 @@ def jobs_markup(rows: Sequence[sqlite3.Row]) -> str:
         amount = f"{'' if actual is not None else '~'}${cost:.4f}" if cost is not None else ""
 
         lines.append(f"[{style}]{_JOB_MARKS.get(status, '·')}[/] {job_subject(params)[:19]}")
-        lines.append(f"  [dim]{status}[/] [dim]{amount}[/]")
+        lines.append(f"  [$dim]{status}[/] [$dim]{amount}[/]")
     return "\n".join(lines)
 
 
@@ -787,7 +794,7 @@ def detail_markup(detail: dict[str, Any] | None, keyword: str) -> str:
     keywords come from a competitor's ranks and were never priced.
     """
     if detail is None:
-        return f"[$violet bold]{keyword}[/]\n\n[$dim]nothing priced for this keyword yet[/]"
+        return f"[$bright bold]{keyword}[/]\n\n[$dim]nothing priced for this keyword yet[/]"
 
     volume = f"{detail['volume']:,}" if detail["volume"] is not None else ABSENT
     cpc = f"${detail['cpc']:.2f}" if detail["cpc"] is not None else ABSENT
@@ -797,7 +804,7 @@ def detail_markup(detail: dict[str, Any] | None, keyword: str) -> str:
     # until you see it is a 78.
     difficulty = str(detail["difficulty"]) if detail.get("difficulty") is not None else ABSENT
 
-    lines = [f"[$violet bold]{detail['keyword']}[/]", ""]
+    lines = [f"[$bright bold]{detail['keyword']}[/]", ""]
     lines.append(_pair("volume", volume))
     lines.append(_pair("difficulty", difficulty))
     lines.append(_pair("intent", _intent(detail)))
@@ -808,12 +815,12 @@ def detail_markup(detail: dict[str, Any] | None, keyword: str) -> str:
         lines.append("")
         for index, rank in enumerate(detail["ranks"][:3]):
             label = "ranks" if index == 0 else ""
-            lines.append(_pair(label, f"{rank['domain']} [bold]#{rank['position']}[/]"))
+            lines.append(_pair(label, f"{rank['domain']} [$bright bold]#{rank['position']}[/]"))
     if detail.get("months"):
         series = [int(month["volume"]) for month in detail["months"]]
         lines.append("")
-        lines.append(_pair(f"{len(series)}mo", f"[bold]{sparkline(series)}[/]"))
-        lines.append(_pair("", f"[dim]{min(series):,} to {max(series):,}[/]"))
+        lines.append(_pair(f"{len(series)}mo", f"[$bright bold]{sparkline(series)}[/]"))
+        lines.append(_pair("", f"[$dim]{min(series):,} to {max(series):,}[/]"))
     if detail["gsc"]:
         gsc = detail["gsc"]
         lines.append("")
@@ -838,7 +845,7 @@ def _pair(label: str, value: str) -> str:
     A blank label continues the row above, which is how a list of ranks reads as
     one fact rather than three.
     """
-    return f"[$cyan]{label:<{_LABEL}}[/]{value}"
+    return f"[$dim]{label:<{_LABEL}}[/]{value}"
 
 
 def _intent(detail: dict[str, Any]) -> str:
@@ -850,11 +857,11 @@ def _intent(detail: dict[str, Any]) -> str:
     """
     intent = detail.get("intent")
     if not intent:
-        return "[dim]intent unknown[/]"
+        return "[$dim]intent unknown[/]"
     probability = detail.get("intent_probability")
     if probability is None:
         return str(intent)
-    return f"{intent} [dim]{probability:.0%}[/]"
+    return f"{intent} [$dim]{probability:.0%}[/]"
 
 
 def _provenance(detail: dict[str, Any]) -> list[str]:
@@ -865,8 +872,8 @@ def _provenance(detail: dict[str, Any]) -> list[str]:
     cost = "free" if not source["cost_usd"] else f"${source['cost_usd']:.5f}"
     return [
         _pair("source", f"#{detail['raw_id']} · {cost}"),
-        _pair("", f"[dim]{source['capability']}[/]"),
-        _pair("", f"[dim]{source['fetched_at'][:10]} · [bold]p[/] opens it[/]"),
+        _pair("", f"[$dim]{source['capability']}[/]"),
+        _pair("", f"[$dim]{source['fetched_at'][:10]} · [$bright bold]p[/] opens it[/]"),
     ]
 
 
@@ -879,18 +886,18 @@ def response_markup(detail: dict[str, Any]) -> str:
     """
     cost = "free" if not detail["cost_usd"] else f"${detail['cost_usd']:.5f}"
     lines = [
-        f"[$violet bold]raw_response #{detail['id']}[/]",
+        f"[$bright bold]raw_response #{detail['id']}[/]",
         "[$dim]immutable bytes[/]",
         "",
         _pair("capability", detail["capability"]),
         _pair("cost", cost),
         _pair("bytes", f"{detail['bytes']:,}"),
         _pair("fetched", detail["fetched_at"][:16].replace("T", " ")),
-        _pair("params", f"[dim]{detail['params_hash'][:12]}[/]"),
+        _pair("params", f"[$dim]{detail['params_hash'][:12]}[/]"),
     ]
     job = detail.get("job")
     if job is not None:
         lines.append(_pair("job", f"{job['id']} · {job['status']}"))
     lines.append("")
-    lines.append("[dim]every row here can be rebuilt from these bytes · nothing re-fetched[/]")
+    lines.append("[$dim]every row here can be rebuilt from these bytes · nothing re-fetched[/]")
     return "\n".join(lines)

@@ -1,27 +1,21 @@
-/* Every colour here comes from the theme in `theme.py`, which is the only
- * place a hex code is written. A theme variable resolves in both a CSS rule
- * and a markup tag, which is why the palette lives there and not here. */
-/* Every surface is the terminal's own background, so whatever translucency it
- * is configured with survives. Separation comes from rules and weight rather
- * than from filled panels.
- *
- * `$background` rather than `transparent`: the latter is transparent *black*
- * and Textual composites it to opaque black before emitting. See `theme.py`. */
+/* Every colour comes from `theme.py`, which mirrors `dev/tui-mockup-2`.
+ * Orange and green are the only hues; neutral surfaces and weight carry every
+ * other kind of emphasis. */
 Screen {
     background: $background;
-    color: $ink;
+    color: $foreground;
 }
 
 #status {
     height: 3;
-    background: $background;
+    background: $panel;
 }
 
 #explore-bar {
     height: 3;
     align: center middle;
-    background: $background;
-    border-bottom: solid $dim 25%;
+    background: $surface;
+    border-bottom: solid $faint;
 }
 
 #explore-options {
@@ -42,10 +36,6 @@ Screen {
     padding: 1 0;
 }
 
-#sections > * {
-    border: solid red;
-}
-
 /* An equal share, but never less than the readout needs. Below about a hundred
  * columns there is not enough bar for both a centred strip and an intact
  * balance, and a truncated figure is worse than an off-centre one. */
@@ -58,17 +48,19 @@ Screen {
 
 #body {
     height: 1fr;
+    background: $surface;
 }
 
 #main {
     width: 1fr;
+    background: $surface;
 }
 
 /* The question this view answers, with the caption beside it. One line: it is
  * orientation, not content, and a second line would push the table down. */
 #head {
     height: 1;
-    background: $background;
+    background: $surface;
 }
 
 #question {
@@ -107,7 +99,8 @@ Screen {
     min-width: 26;
     max-width: 44;
     height: 1fr;
-    border: solid $violet 55%;
+    border: solid $faint;
+    background: $surface;
 }
 
 #detail {
@@ -120,7 +113,7 @@ Screen {
 #jobs {
     width: 1fr;
     height: 9;
-    border-top: solid $dim 30%;
+    border-top: solid $faint;
     padding: 0 1;
 }
 
@@ -148,8 +141,8 @@ Screen.-compact #jobs {
     height: 1;
     border: none;
     padding: 0 1;
-    background: $background;
-    color: $ink;
+    background: $panel;
+    color: $foreground;
 }
 
 /* The command bar is the only route to a paid action, so it wears the spend
@@ -162,7 +155,7 @@ Screen.-compact #jobs {
 /* One row, so the price and the command being typed are read together. */
 #command-row {
     height: 1;
-    background: $background;
+    background: $panel;
 }
 
 /* The verdict rides on the right of the bar: what this command would do, in one
@@ -173,7 +166,7 @@ Screen.-compact #jobs {
     max-width: 60%;
     padding: 0 1;
     text-align: right;
-    background: $background;
+    background: $panel;
 }
 
 #verdict.-spend {
@@ -186,7 +179,7 @@ Screen.-compact #jobs {
 }
 
 #verdict.-error {
-    color: $alert;
+    color: $bright;
 }
 
 #verdict.-info, #verdict.-idle {
@@ -205,7 +198,7 @@ Screen.-compact #jobs {
     height: auto;
     max-height: 6;
     padding: 0 1;
-    background: $background;
+    background: $plan;
 }
 
 #plan.-spend {
@@ -217,7 +210,7 @@ Screen.-compact #jobs {
 }
 
 #plan.-error {
-    color: $alert;
+    color: $bright;
 }
 
 #plan.-info, #plan.-idle {
@@ -232,7 +225,7 @@ ConfirmModal {
     width: 52;
     height: auto;
     border: round $spend;
-    background: $background;
+    background: $surface;
     padding: 1 2;
 }
 
@@ -250,60 +243,59 @@ ConfirmModal {
 /* ------------------------------------------------------------------ table */
 
 /* Flat rows with a rule under the header, rather than zebra banding. Striping
- * fills every other row with a colour that means nothing, which on a
- * transparent background reads as the terminal showing through unevenly. */
+ * fills every other row with a colour that means nothing. */
 DataTable {
     scrollbar-size: 1 1;
 }
 
 DataTable > .datatable--header {
-    background: $background;
+    background: $surface;
     color: $dim;
     text-style: none;
 }
 
 DataTable > .datatable--cursor {
-    background: $violet 30%;
-    color: $ink;
+    background: $panel;
+    color: $bright;
 }
 
 DataTable > .datatable--hover {
-    background: $violet 25%;
+    background: $hover;
 }
 
 /* The identifying column of the row under the cursor, which is the one the
  * inspector beside it is describing. */
 DataTable > .datatable--fixed {
-    background: $background;
+    background: $surface;
     color: $dim;
 }
 
 /* ----------------------------------------------------------------- footer */
 
 Footer {
-    background: $background;
+    background: $surface;
 }
 
 Footer > .footer-key--key {
-    background: $background;
-    color: $cyan;
+    background: $surface;
+    color: $bright;
 }
 
 Footer > .footer-key--description {
-    background: $background;
+    background: $surface;
     color: $dim;
 }
 
 /* A rule under the header block, replacing the filled bar that used to
  * separate it from the table. */
 #head {
-    border-bottom: solid $dim 25%;
+    border-bottom: solid $faint;
 }
 
 #status {
-    border-bottom: solid $dim 25%;
+    border-bottom: solid $faint;
 }
 
 #command-row {
-    border-top: solid $dim 25%;
+    border-top: solid $faint;
 }

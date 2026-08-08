@@ -55,19 +55,22 @@ class ConfirmModal(ModalScreen[bool]):
         with Vertical(id="confirm"):
             yield Static(f"pull {self._what}", id="confirm-title")
             yield Static(self._body(), id="confirm-body")
-            yield Static("[bold]enter[/] pull    [bold]esc[/] cancel", id="confirm-keys")
+            yield Static(
+                "[$bright bold]enter[/] pull    [$bright bold]esc[/] cancel",
+                id="confirm-keys",
+            )
 
     def _body(self) -> str:
         """The bill, laid out for a modal. Every figure comes from ``confirmation``."""
         bill = confirmation.bill_for(self._conn, self._budget, self._estimate)
         lines = []
         if self._detail:
-            lines.append(f"[dim]{self._detail}[/]")
+            lines.append(f"[$dim]{self._detail}[/]")
         lines.append(f"{bill.rows:<22} not cached")
-        lines.append(f"[bold]{bill.amount}[/]{'':<14} {bill.terms}")
+        lines.append(f"[$bright bold]{bill.amount}[/]{'':<14} {bill.terms}")
         lines.append(f"remaining this month: {bill.remaining}")
         if bill.balance is not None:
-            marker, close = ("[red]", "[/]") if bill.over_balance else ("", "")
+            marker, close = ("[$bright bold]", "[/]") if bill.over_balance else ("", "")
             lines.append(f"vendor balance:       {marker}{bill.balance}{close}")
         return "\n".join(lines)
 

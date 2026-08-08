@@ -105,7 +105,7 @@ class ZipfApp(App[None]):
         """Make the palette's names known to the stylesheet parser.
 
         ``zipf.tcss`` is read during startup, before ``on_mount`` can register
-        the theme, so without this every ``$cyan`` in it is an undefined
+        the theme, so without this every custom palette variable is an undefined
         variable at parse time and the app refuses to start.
         """
         return dict(ZIPF_THEME.variables)
@@ -143,11 +143,7 @@ class ZipfApp(App[None]):
         budget: Budget | None = None,
         own_domain: str | None = None,
     ) -> None:
-        # `ansi_color` keeps ANSI colours native. Without it Textual installs
-        # an `ANSIToTruecolor` filter that rewrites the theme's `ansi_default`
-        # background into a concrete RGB before it reaches the terminal —
-        # which paints every cell and defeats the transparency entirely.
-        super().__init__(ansi_color=True)
+        super().__init__()
         self._conn = conn
         # Without a write handle the app is a reader: every `:` command that
         # would enqueue or fetch refuses rather than failing inside SQLite.
@@ -416,7 +412,7 @@ class ZipfApp(App[None]):
         is one that can cost money — it is a price tag, not a tip.
         """
         self.query_one("#question", Static).update(
-            f"[bold]{escape(spec.question)}[/]  [dim]{escape(self._caption(spec))}[/]"
+            f"[$bright bold]{escape(spec.question)}[/]  [$dim]{escape(self._caption(spec))}[/]"
         )
         self.query_one("#hint", Static).update(escape(spec.hint))
 
@@ -433,12 +429,12 @@ class ZipfApp(App[None]):
                 return
 
         if self._spec.is_empty or cursor_row >= len(self._spec.keys):
-            detail.update(f"[dim]{escape(self._spec.caption)}[/]")
+            detail.update(f"[$dim]{escape(self._spec.caption)}[/]")
             return
 
         key = self._spec.keys[cursor_row]
         if self._spec.key_kind != views.KEYWORD_KEY:
-            detail.update(f"[bold]{escape(key)}[/]\n[dim]{escape(self._spec.caption)}[/]")
+            detail.update(f"[$bright bold]{escape(key)}[/]\n[$dim]{escape(self._spec.caption)}[/]")
             return
 
         detail.update(views.detail_markup(browse.keyword_detail(self._conn, key), key))
@@ -695,7 +691,7 @@ class ZipfApp(App[None]):
 
         plan.classes = f"-{result.register}"
         plan.update(
-            "\n".join(f"[dim]{label:<14}[/]{escape(value)}" for label, value in result.lines)
+            "\n".join(f"[$dim]{label:<14}[/]{escape(value)}" for label, value in result.lines)
         )
         plan.display = bool(result.lines)
 
