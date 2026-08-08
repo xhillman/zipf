@@ -19,7 +19,6 @@ Three rules hold throughout, because the caller is a UI driven by typed input:
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
 from typing import Any, Final
 
 from zipf.errors import InvalidRequestError
@@ -106,19 +105,6 @@ PROJECTED_TABLES: Final[tuple[str, ...]] = (
 )
 
 
-@dataclass(frozen=True)
-class CacheCounts:
-    """What the sidebar counts. One number per bucket the tree offers."""
-
-    keywords: int
-    domains: int
-    gap_pairs: int
-    gsc_queries: int
-    observations: int
-    responses: int
-    jobs_pending: int
-
-
 def _bounded(limit: int) -> int:
     """Clamp a caller's page size into something a table can render."""
     return max(1, min(limit, MAX_ROWS))
@@ -153,38 +139,10 @@ def _contains(term: str) -> str:
     return f"%{escaped}%"
 
 
-def counts(conn: sqlite3.Connection) -> CacheCounts:
-    """Row counts for every bucket, in one pass per table.
-
-    ``observations`` is always zero until the SERP and LLM milestones land. It is
-    counted anyway: a sidebar that hid the bucket would suggest the surface does
-    not exist rather than that nothing has been observed yet.
-    """
-    row = conn.execute(
-        """
-        SELECT
-          (SELECT COUNT(*) FROM keyword)                                  AS keywords,
-          (SELECT COUNT(DISTINCT domain) FROM domain_keyword)             AS domains,
-          (SELECT COUNT(DISTINCT json_extract(params_json, '$.target1')
-                        || ' vs ' || json_extract(params_json, '$.target2'))
-             FROM raw_response
-            WHERE capability = ?)                                        AS gap_pairs,
-          (SELECT COUNT(DISTINCT query) FROM gsc_query)                   AS gsc_queries,
-          (SELECT COUNT(*) FROM observation)                              AS observations,
-          (SELECT COUNT(*) FROM raw_response)                             AS responses,
-          (SELECT COUNT(*) FROM job WHERE status IN ('queued', 'running')) AS jobs_pending
-        """,
-        (labs.DOMAIN_INTERSECTION,),
-    ).fetchone()
-    return CacheCounts(
-        keywords=int(row["keywords"]),
-        domains=int(row["domains"]),
-        gap_pairs=int(row["gap_pairs"]),
-        gsc_queries=int(row["gsc_queries"]),
-        observations=int(row["observations"]),
-        responses=int(row["responses"]),
-        jobs_pending=int(row["jobs_pending"]),
-    )
+def keyword_count(conn: sqlite3.Connection) -> int:
+    """Count the keywords named in the persistent status bar."""
+    row = conn.execute("SELECT COUNT(*) AS count FROM keyword").fetchone()
+    return int(row["count"])
 
 
 def keywords(

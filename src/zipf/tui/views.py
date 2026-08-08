@@ -1,4 +1,4 @@
-"""What each sidebar node puts in the table.
+"""What each application view puts in the table.
 
 Deliberately free of Textual imports. A view is a pure function of the database
 plus a selection, returning columns and cells, so the mapping is testable without
@@ -31,8 +31,7 @@ from zipf.services import gap as gap_service
 from zipf.services.budget import BudgetStatus
 from zipf.sources.dataforseo import labs
 
-#: Sidebar buckets. The tree order is the order you would ask the questions in:
-#: what do I know, who else ranks, where is the space, what do I already own.
+#: The available application views.
 KEYWORDS: Final = "keywords"
 DOMAINS: Final = "domains"
 DOMAIN: Final = "domain"
@@ -180,7 +179,7 @@ _VOLUME_TTL: Final = capabilities.get(labs.SEARCH_VOLUME).ttl
 
 @dataclass(frozen=True)
 class View:
-    """A sidebar selection: which bucket, and which member of it."""
+    """A table selection: which view, and which member of it."""
 
     kind: str
     arg: str | None = None
@@ -579,7 +578,7 @@ def table_for(
     marked: frozenset[str] = frozenset(),
     forensic: bool = False,
 ) -> TableSpec:
-    """Build the table for one sidebar selection.
+    """Build the table for one view selection.
 
     ``marked`` and ``forensic`` are display state the app owns: which rows the
     user has selected, and whether to show where each figure came from. Both are
@@ -682,19 +681,19 @@ def title_line(view: View, section: str = SECTIONS[0]) -> str:
     return f"[bold]zipf[/] [$dim]/[/] [$cyan]{where}[/]"
 
 
-def status_line(state: BudgetStatus, totals: browse.CacheCounts) -> str:
+def status_line(state: BudgetStatus, keywords: int) -> str:
     """The right of the title bar: what is stored, and what is left to spend.
 
     Leads the money with the effective limit for the same reason ``zipf budget``
     does — two limits shown as equals read as confusion. The meter is the same
     function the CLI uses, so the bar cannot disagree between the two shells.
 
-    Domains and pending jobs are deliberately absent: the sidebar counts the
-    first and the jobs pane shows the second, and a readout that repeats what is
-    already on screen is the noise the PRD rules out.
+    Domains and pending jobs are deliberately absent. The readout keeps the
+    cache summary to one leading measure, while the jobs pane already shows the
+    second.
     """
     return (
-        f"[$cyan]{plural(totals.keywords, 'keyword')}[/] [$dim]·[/] "
+        f"[$cyan]{plural(keywords, 'keyword')}[/] [$dim]·[/] "
         f"[$cyan bold]${state.effective_limit:.2f}[/] [$dim]left[/] "
         f"[$cyan]{meter(state.used_fraction)}[/]"
     )

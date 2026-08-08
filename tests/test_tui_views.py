@@ -1,4 +1,4 @@
-"""The view layer: what each sidebar selection puts in the table.
+"""The view layer: what each application view puts in the table.
 
 No Textual here. These are the assertions that would be painful to make through
 a terminal and that matter most — column shapes, silence below the TTL, and
@@ -15,7 +15,6 @@ import pytest
 from rich.text import Text
 
 from zipf.clock import now, to_iso
-from zipf.services.browse import CacheCounts
 from zipf.services.budget import BudgetStatus
 from zipf.tui import views
 from zipf.tui.views import View
@@ -56,7 +55,7 @@ def test_age_renders_only_past_ttl(db: sqlite3.Connection) -> None:
 
     Asserted on the domain table, which is where an age column now lives: the
     keyword table leads with what decides a keyword, and staleness has its own
-    view and its own sidebar count.
+    dedicated view.
     """
     recent = to_iso(now() - timedelta(days=2))
     old = to_iso(now() - timedelta(days=45))
@@ -152,23 +151,14 @@ def test_status_line_leads_with_the_effective_limit() -> None:
         balance=5.0,
         balance_age=timedelta(0),
     )
-    totals = CacheCounts(
-        keywords=1204,
-        domains=4,
-        gap_pairs=2,
-        gsc_queries=0,
-        observations=0,
-        responses=49,
-        jobs_pending=2,
-    )
-    line = _plain(views.status_line(state, totals))
+    line = _plain(views.status_line(state, 1204))
     assert "$5.00 left" in line  # the balance, not the $18.00 ceiling remainder
     assert "1,204 keywords" in line
     assert "▓" in line  # the meter stays
 
 
 def test_status_line_does_not_repeat_what_is_already_on_screen() -> None:
-    """The sidebar counts domains and the jobs pane shows jobs.
+    """The jobs pane shows jobs and the status line stays focused on keywords.
 
     A readout that restates them spends the one line it has on things the eye
     can already reach, which is the noise the PRD rules out.
@@ -176,16 +166,7 @@ def test_status_line_does_not_repeat_what_is_already_on_screen() -> None:
     state = BudgetStatus(
         spent=0.0, ceiling=20.0, remaining=20.0, threshold=0.0, balance=None, balance_age=None
     )
-    totals = CacheCounts(
-        keywords=12,
-        domains=4,
-        gap_pairs=2,
-        gsc_queries=0,
-        observations=0,
-        responses=9,
-        jobs_pending=3,
-    )
-    line = views.status_line(state, totals)
+    line = views.status_line(state, 12)
     assert "12 keywords" in line
     assert "domain" not in line
     assert "job" not in line
@@ -203,7 +184,7 @@ def test_a_view_with_an_argument_names_it() -> None:
 
 
 def test_a_view_with_no_argument_drops_the_slot() -> None:
-    """Reached from the sidebar rather than a row, so there is nothing to name."""
+    """A collection view has no selected row to name."""
     assert views.view_name(View(views.DOMAIN)) == "domain"
 
 

@@ -49,23 +49,6 @@ Screen {
     height: 1fr;
 }
 
-#side {
-    width: 24;
-    border-right: solid $dim 30%;
-}
-
-#sidebar {
-    height: 1fr;
-    padding: 0 1;
-}
-
-/* Fixed height so a finished job appearing never resizes the tree above it. */
-#jobs {
-    height: 9;
-    border-top: solid $dim 30%;
-    padding: 0 1;
-}
-
 #main {
     width: 1fr;
 }
@@ -108,12 +91,25 @@ Screen {
  *
  * Its width does not depend on the row under the cursor, so the table's columns
  * do not shift as you move between keywords with more or fewer known surfaces. */
-#detail {
+#inspector {
     width: 34%;
     min-width: 26;
     max-width: 44;
-    height: auto;
+    height: 1fr;
     border: solid $violet 55%;
+}
+
+#detail {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+}
+
+/* Fixed height so a finished job appearing never resizes the detail above it. */
+#jobs {
+    width: 1fr;
+    height: 9;
+    border-top: solid $dim 30%;
     padding: 0 1;
 }
 
@@ -251,29 +247,6 @@ DataTable > .datatable--hover {
 DataTable > .datatable--fixed {
     background: $background;
     color: $dim;
-}
-
-/* ------------------------------------------------------------------- tree */
-
-/* `color` is not inherited in Textual CSS, and with an ANSI background Textual
- * cannot compute a contrasting default — so both of these fall back to the
- * terminal's foreground unless told otherwise. */
-Tree {
-    background: $background;
-    color: $ink;
-}
-
-Tree > .tree--guides, Tree > .tree--guides-hover, Tree > .tree--guides-selected {
-    color: $dim 40%;
-}
-
-Tree > .tree--cursor {
-    background: $violet 18%;
-    color: $ink;
-}
-
-Tree > .tree--highlight {
-    background: $violet 10%;
 }
 
 /* ----------------------------------------------------------------- footer */

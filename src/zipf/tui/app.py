@@ -29,8 +29,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import DataTable, Footer, Input, Static, Tree
-from textual.widgets.tree import TreeNode
+from textual.widgets import DataTable, Footer, Input, Static
 
 from zipf.budget import Budget
 from zipf.errors import ZipfError
@@ -75,8 +74,7 @@ class ZipfApp(App[None]):
     # undiscoverable; showing all nine at once is a wall nobody reads.
     BINDINGS: ClassVar[list[BindingType]] = [
         # `priority` because the screen binds tab to focus-next and would
-        # otherwise swallow it before the app sees it. `shift+tab` is left alone,
-        # so focus traversal — and with it the sidebar — stays reachable.
+        # otherwise swallow it before the app sees it.
         Binding("tab", "next_section", "section", priority=True),
         Binding("space", "mark", "mark"),
         Binding("p", "source", "source"),
@@ -171,32 +169,30 @@ class ZipfApp(App[None]):
             yield Static(id="brand")
             yield Static(id="sections")
             yield Static(id="balance")
-        with Horizontal(id="body"):
-            with Vertical(id="side"):
-                yield Tree("cache", id="sidebar")
-                yield Static(id="jobs")
-            with Vertical(id="main"):
-                # Two widgets rather than one line of markup, so the hint's
-                # spend colour comes from the stylesheet that already defines it
-                # rather than from a second copy of the value in Python.
-                with Horizontal(id="head"):
-                    yield Static(id="question")
-                    yield Static(id="hint")
-                # The table and the inspector side by side. The inspector is
-                # about one row, so it belongs beside the rows rather than under
-                # them, where it competed with the table for vertical space and
-                # got six lines to say everything.
-                with Horizontal(id="workspace"):
-                    yield DataTable(id="rows", cursor_type="row")
+        with Horizontal(id="body"), Vertical(id="main"):
+            # Two widgets rather than one line of markup, so the hint's
+            # spend colour comes from the stylesheet that already defines it
+            # rather than from a second copy of the value in Python.
+            with Horizontal(id="head"):
+                yield Static(id="question")
+                yield Static(id="hint")
+            # The table and the inspector side by side. The inspector is
+            # about one row, so it belongs beside the rows rather than under
+            # them, where it competed with the table for vertical space and
+            # got six lines to say everything.
+            with Horizontal(id="workspace"):
+                yield DataTable(id="rows", cursor_type="row")
+                with Vertical(id="inspector"):
                     yield Static(id="detail")
-                yield Static(id="plan")
-                yield Input(placeholder="filter", id="filter")
-                # The headline rides on the same row as the thing being typed,
-                # so the price and the command are read together rather than
-                # asking the eye to leave the line it is working on.
-                with Horizontal(id="command-row"):
-                    yield Input(placeholder=":command", id="command")
-                    yield Static(id="verdict")
+                    yield Static(id="jobs")
+            yield Static(id="plan")
+            yield Input(placeholder="filter", id="filter")
+            # The headline rides on the same row as the thing being typed,
+            # so the price and the command are read together rather than
+            # asking the eye to leave the line it is working on.
+            with Horizontal(id="command-row"):
+                yield Input(placeholder=":command", id="command")
+                yield Static(id="verdict")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -207,7 +203,6 @@ class ZipfApp(App[None]):
         self.query_one("#filter", Input).display = False
         self.query_one("#command-row", Horizontal).display = False
         self.query_one("#plan", Static).display = False
-        self._build_sidebar()
         self.show_view(View(views.KEYWORDS))
         self._refresh_jobs()
         await self.refresh_status()
@@ -231,46 +226,6 @@ class ZipfApp(App[None]):
     def _post_job_activity(self, note: str) -> None:
         self.post_message(JobActivity(note))
 
-    # ---------------------------------------------------------------- sidebar
-
-    def _build_sidebar(self) -> None:
-        """One node per bucket, labelled with what it holds.
-
-        Counts go in the label rather than a separate column because the sidebar
-        is narrow and a bucket with nothing in it is the single most useful thing
-        the tree can tell you at a glance.
-        """
-        totals = browse.counts(self._conn)
-        tree: Tree[View] = self.query_one("#sidebar", Tree)
-        # Rebuilt from scratch on every refresh, so a finished job that added a
-        # domain shows up as a node rather than only as a changed count.
-        tree.root.remove_children()
-        tree.root.data = View(views.KEYWORDS)
-        tree.root.set_label(f"cache  {totals.keywords:,}")
-
-        domains = tree.root.add(f"domains  {totals.domains}", data=View(views.DOMAINS))
-        for row in browse.domains(self._conn):
-            domains.add_leaf(
-                f"{row['domain']}  {row['keywords']:,}",
-                data=View(views.DOMAIN, row["domain"]),
-            )
-
-        gaps = tree.root.add(f"gaps  {totals.gap_pairs}", data=View(views.GAPS))
-        for pair in browse.gap_pairs(self._conn):
-            gaps.add_leaf(
-                f"{pair['competitor']}",
-                data=View(views.GAP, f"{pair['competitor']}|{pair['mine']}"),
-            )
-
-        # Two buckets that are questions rather than tables: what has aged out,
-        # and what was paid for. Both read data the cache already holds.
-        stale = len(browse.stale_keywords(self._conn))
-        tree.root.add_leaf(f"stale  {stale}", data=View(views.STALE))
-        tree.root.add_leaf(f"gsc  {totals.gsc_queries:,}", data=View(views.GSC))
-        tree.root.add_leaf(f"visibility  {totals.observations}", data=View(views.VISIBILITY))
-        tree.root.add_leaf(f"responses  {totals.responses:,}", data=View(views.RESPONSES))
-        tree.root.expand()
-
     # ------------------------------------------------------------------ table
 
     def show_view(self, view: View, *, remember: bool = False) -> None:
@@ -281,8 +236,7 @@ class ZipfApp(App[None]):
         table produces an empty screen whose cause is off-screen.
 
         ``remember`` records where you came from, so drilling and following a
-        row's source can be reversed. A sidebar selection does not: the tree is
-        always on screen, so "back" from it would mean nothing.
+        row's source can be reversed.
         """
         if remember:
             self._back.append(self._view)
@@ -463,7 +417,7 @@ class ZipfApp(App[None]):
         """
         state = await budget_service.status(self._conn, self._budget, refresh=False)
         self.query_one("#balance", Static).update(
-            views.status_line(state, browse.counts(self._conn))
+            views.status_line(state, browse.keyword_count(self._conn))
         )
 
     # ---------------------------------------------------------------- actions
@@ -583,7 +537,6 @@ class ZipfApp(App[None]):
         ``raw_response`` row, which the browsing connection cannot do — that
         arrives with the read-write handle the job runner brings.
         """
-        self._build_sidebar()
         self._reload_table()
         await self.refresh_status()
 
@@ -604,15 +557,9 @@ class ZipfApp(App[None]):
         if not self.is_running:
             return
         self._refresh_jobs()
-        self._build_sidebar()
         self._reload_table()
         await self.refresh_status()
         self.notify(event.note, severity="information")
-
-    def on_tree_node_selected(self, event: Tree.NodeSelected[View]) -> None:
-        node: TreeNode[View] = event.node
-        if node.data is not None:
-            self.show_view(node.data)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self._show_detail(event.cursor_row)
@@ -730,7 +677,6 @@ class ZipfApp(App[None]):
         if outcome.view is not None:
             self.show_view(outcome.view)
         if outcome.changed:
-            self._build_sidebar()
             self._reload_table()
             await self.refresh_status()
         self.notify(outcome.message, severity=outcome.severity)

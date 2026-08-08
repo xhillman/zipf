@@ -16,8 +16,8 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
-from textual.containers import Horizontal
-from textual.widgets import DataTable, Input, Static, Tree
+from textual.containers import Horizontal, Vertical
+from textual.widgets import DataTable, Input, Static
 
 from zipf.budget import Budget
 from zipf.clock import now_iso
@@ -92,24 +92,15 @@ async def test_opens_on_keywords(seeded: sqlite3.Connection) -> None:
         assert app.sub_title == "2 keywords"
 
 
-async def test_sidebar_lists_every_bucket(seeded: sqlite3.Connection) -> None:
-    tree: Tree[views.View]
+async def test_jobs_sit_below_the_detail_pane(seeded: sqlite3.Connection) -> None:
     app = ZipfApp(seeded)
     async with app.run_test():
-        tree = app.query_one("#sidebar", Tree)
-        labels = [str(node.label) for node in tree.root.children]
-        assert labels == [
-            "domains  1",
-            "gaps  1",
-            "stale  0",
-            "gsc  0",
-            "visibility  0",
-            "responses  1",
-        ]
-        assert str(tree.root.label) == "cache  2"
+        inspector = app.query_one("#inspector", Vertical)
+        assert [child.id for child in inspector.children] == ["detail", "jobs"]
+        assert not app.query("#sidebar")
 
 
-async def test_selecting_a_node_swaps_the_table(seeded: sqlite3.Connection) -> None:
+async def test_showing_a_view_swaps_the_table(seeded: sqlite3.Connection) -> None:
     """Columns are rebuilt, so a stale header can never sit over new data."""
     app = ZipfApp(seeded)
     async with app.run_test():
@@ -329,7 +320,6 @@ async def test_reload_picks_up_a_row_written_since_opening(zipf_home: Path) -> N
             await pilot.press("r")
             await pilot.pause()
             assert app.query_one("#rows", DataTable).row_count == 1
-            assert "cache  1" in str(app.query_one("#sidebar", Tree).root.label)
     finally:
         conn.close()
 
@@ -868,13 +858,15 @@ async def test_a_long_keyword_does_not_widen_the_column(db: sqlite3.Connection) 
         assert next(iter(table.columns.values())).width == table.size.width // 3
 
 
-async def test_a_table_too_narrow_to_cap_is_left_alone(seeded: sqlite3.Connection) -> None:
-    """Forcing an eighteen-wide column into a sixteen-wide table helps nobody."""
+async def test_removed_sidebar_leaves_room_for_the_keyword_floor(
+    seeded: sqlite3.Connection,
+) -> None:
+    """The table now has enough room for a readable keyword at eighty columns."""
     app = ZipfApp(seeded)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         table = app.query_one("#rows", DataTable)
-        assert next(iter(table.columns.values())).width < 18
+        assert next(iter(table.columns.values())).width == 18
 
 
 async def test_only_the_keyword_column_is_capped(seeded: sqlite3.Connection) -> None:
@@ -892,11 +884,14 @@ async def test_the_inspector_sits_beside_the_table(seeded: sqlite3.Connection) -
     async with app.run_test(size=(160, 40)) as pilot:
         await pilot.pause()
         table = app.query_one("#rows", DataTable)
+        inspector = app.query_one("#inspector", Vertical)
         detail = app.query_one("#detail", Static)
+        jobs = app.query_one("#jobs", Static)
 
-        assert detail.region.x > table.region.x  # to the right, not below
-        assert detail.region.y == table.region.y  # same row
-        assert detail.size.height == table.size.height  # full height beside it
+        assert inspector.region.x > table.region.x  # to the right, not below
+        assert inspector.region.y == table.region.y  # same row
+        assert inspector.region.height == table.region.height  # full height beside it
+        assert jobs.region.y > detail.region.y  # jobs sit under detail
 
 
 async def test_the_inspector_does_not_swallow_a_narrow_terminal(

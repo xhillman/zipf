@@ -75,21 +75,12 @@ def seeded(db: sqlite3.Connection) -> sqlite3.Connection:
     return db
 
 
-def test_counts_report_every_bucket(seeded: sqlite3.Connection) -> None:
-    totals = browse.counts(seeded)
-    assert totals.keywords == 4
-    assert totals.domains == 2
-    assert totals.gap_pairs == 1
-    assert totals.observations == 0  # empty until the SERP and LLM milestones
-    assert totals.jobs_pending == 0
+def test_keyword_count(seeded: sqlite3.Connection) -> None:
+    assert browse.keyword_count(seeded) == 4
 
 
-def test_counts_an_empty_cache(db: sqlite3.Connection) -> None:
-    """An empty database returns zeros, not None and not an error."""
-    totals = browse.counts(db)
-    assert totals.keywords == 0
-    assert totals.gap_pairs == 0
-    assert totals.responses == 0
+def test_keyword_count_of_an_empty_cache(db: sqlite3.Connection) -> None:
+    assert browse.keyword_count(db) == 0
 
 
 def test_keywords_default_to_volume_order_with_unpriced_last(
@@ -135,7 +126,7 @@ def test_sort_keys_are_allowlisted(seeded: sqlite3.Connection) -> None:
     with pytest.raises(InvalidRequestError) as caught:
         browse.keywords(seeded, sort="volume; DROP TABLE keyword")
     assert "volume" in str(caught.value.fix)
-    assert browse.counts(seeded).keywords == 4  # the table is still there
+    assert browse.keyword_count(seeded) == 4  # the table is still there
 
 
 def test_every_query_is_bounded(seeded: sqlite3.Connection) -> None:
