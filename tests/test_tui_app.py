@@ -678,6 +678,67 @@ async def test_marks_survive_a_change_of_view(seeded: sqlite3.Connection) -> Non
         assert app.marked == marked
 
 
+async def test_w_toggles_the_highlighted_keyword(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        table = app.query_one("#rows", DataTable)
+        keyword = str(table.get_row_at(0)[0]).lstrip()
+
+        await pilot.press("w")
+        assert watchlist.are_watched(seeded, [keyword])
+
+        await pilot.press("w")
+        assert not seeded.execute("SELECT 1 FROM watchlist").fetchone()
+
+
+async def test_w_toggles_every_marked_keyword_without_clearing_marks(
+    seeded: sqlite3.Connection,
+) -> None:
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("space", "down", "space")
+        marked = app.marked
+
+        await pilot.press("w")
+        assert watchlist.are_watched(seeded, marked)
+        assert app.marked == marked
+
+        await pilot.press("w")
+        assert not seeded.execute("SELECT 1 FROM watchlist").fetchone()
+        assert app.marked == marked
+
+
+async def test_unwatching_inside_watchlist_removes_the_row(
+    seeded: sqlite3.Connection,
+) -> None:
+    watchlist.toggle(seeded, ["best crm software"])
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        table = app.query_one("#rows", DataTable)
+        await pilot.press("2")
+        assert table.row_count == 1
+
+        await pilot.press("w")
+
+        assert table.row_count == 0
+        assert app.check_action("watch", ()) is None
+
+
+async def test_w_in_a_read_only_app_changes_nothing(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("w")
+        assert not seeded.execute("SELECT 1 FROM watchlist").fetchone()
+
+
+async def test_w_still_types_into_the_filter(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded, write_conn=seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("slash", "w")
+        assert app.query_one("#filter", Input).value == "w"
+        assert not seeded.execute("SELECT 1 FROM watchlist").fetchone()
+
+
 async def test_p_opens_the_response_behind_a_row(seeded: sqlite3.Connection) -> None:
     """The raw_id edge walked backwards, from a figure to the bytes behind it."""
     raw_id = seeded.execute(
@@ -798,12 +859,14 @@ async def test_the_footer_offers_only_keys_that_apply_here(
     app = ZipfApp(seeded)
     async with app.run_test() as pilot:
         assert app.check_action("mark", ()) is True
+        assert app.check_action("watch", ()) is True
         assert app.check_action("source", ()) is True
         assert app.check_action("sort", ()) is True
 
         app.show_view(views.View(views.RESPONSES))
         await pilot.pause()
         assert app.check_action("mark", ()) is None
+        assert app.check_action("watch", ()) is None
         assert app.check_action("source", ()) is None
         assert app.check_action("sort", ()) is True  # the ledger sorts
 

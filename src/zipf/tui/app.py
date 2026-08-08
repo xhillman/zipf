@@ -31,8 +31,10 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import DataTable, Footer, Input, Static
 
+from zipf import watchlist
 from zipf.budget import Budget
 from zipf.errors import ZipfError
+from zipf.format import plural
 from zipf.jobs import queue as job_queue
 from zipf.jobs.runner import JobRunner
 from zipf.pricing import PriceEstimate
@@ -71,7 +73,7 @@ class ZipfApp(App[None]):
     TITLE = "zipf"
     # Every binding is declared, and `_refresh_footer` decides which are worth
     # showing for the row you are on. Hiding a key outright would make it
-    # undiscoverable; showing all nine at once is a wall nobody reads.
+    # undiscoverable; showing every key at once is a wall nobody reads.
     BINDINGS: ClassVar[list[BindingType]] = [
         # `priority` because the screen binds tab to focus-next and would
         # otherwise swallow it before the app sees it.
@@ -79,6 +81,7 @@ class ZipfApp(App[None]):
         Binding("1", "explore_all", "all", show=False),
         Binding("2", "explore_watchlist", "watchlist", show=False),
         Binding("space", "mark", "mark"),
+        Binding("w", "watch", "watch"),
         Binding("p", "source", "source"),
         Binding("s", "sort", "sort"),
         Binding("d", "density", "sources"),
@@ -114,6 +117,9 @@ class ZipfApp(App[None]):
         """
         if action in {"mark", "source"}:
             return True if self._spec.key_kind == views.KEYWORD_KEY else None
+        if action == "watch":
+            has_target = bool(self._marked or self._spec.keys)
+            return True if self._spec.key_kind == views.KEYWORD_KEY and has_target else None
         if action in {"explore_all", "explore_watchlist"}:
             return True if self._section == views.SECTIONS[0] else None
         if action == "sort":
@@ -491,6 +497,30 @@ class ZipfApp(App[None]):
         else:
             self._marked.add(key)
         self._reload_table()
+
+    def action_watch(self) -> None:
+        """Toggle the marked keywords, or the highlighted keyword when unmarked."""
+        targets = self._watch_targets()
+        if not targets:
+            self.notify("no keyword to watch", severity="information")
+            return
+
+        try:
+            watching = watchlist.toggle(self.write, targets)
+        except ZipfError as exc:
+            self.notify(exc.fix or exc.problem, title=exc.problem, severity="warning")
+            return
+
+        self._reload_table()
+        count = plural(len(targets), "keyword")
+        message = f"watching {count}" if watching else f"removed {count} from watchlist"
+        self.notify(message, severity="information")
+
+    def _watch_targets(self) -> frozenset[str]:
+        if self._marked:
+            return frozenset(self._marked)
+        key = self._cursor_key()
+        return frozenset((key,)) if key else frozenset()
 
     def action_source(self) -> None:
         """Open the response that produced the highlighted row.
