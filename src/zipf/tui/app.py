@@ -76,6 +76,8 @@ class ZipfApp(App[None]):
         # `priority` because the screen binds tab to focus-next and would
         # otherwise swallow it before the app sees it.
         Binding("tab", "next_section", "section", priority=True),
+        Binding("1", "explore_all", "all", show=False),
+        Binding("2", "explore_watchlist", "watchlist", show=False),
         Binding("space", "mark", "mark"),
         Binding("p", "source", "source"),
         Binding("s", "sort", "sort"),
@@ -112,6 +114,8 @@ class ZipfApp(App[None]):
         """
         if action in {"mark", "source"}:
             return True if self._spec.key_kind == views.KEYWORD_KEY else None
+        if action in {"explore_all", "explore_watchlist"}:
+            return True if self._section == views.SECTIONS[0] else None
         if action == "sort":
             return True if views.SORT_CYCLES.get(self._view.kind) else None
         return True
@@ -161,6 +165,7 @@ class ZipfApp(App[None]):
         # today — the sections other than `explore` have nothing behind them
         # yet, and cycling to one deliberately leaves the view alone.
         self._section = views.SECTIONS[0]
+        self._explore_mode = views.EXPLORE_ALL
 
     def compose(self) -> ComposeResult:
         # Where you are on the left, what you have and what is left on the
@@ -169,6 +174,8 @@ class ZipfApp(App[None]):
             yield Static(id="brand")
             yield Static(id="sections")
             yield Static(id="balance")
+        with Horizontal(id="explore-bar"):
+            yield Static(id="explore-options")
         with Horizontal(id="body"), Vertical(id="main"):
             # Two widgets rather than one line of markup, so the hint's
             # spend colour comes from the stylesheet that already defines it
@@ -260,6 +267,7 @@ class ZipfApp(App[None]):
             sort=self._sort,
             marked=frozenset(self._marked),
             forensic=self._forensic,
+            watchlisted_only=self._explore_mode == views.EXPLORE_WATCHLIST,
         )
         table = self.query_one("#rows", DataTable)
         # Which row the cursor was on, by identity rather than by position.
@@ -354,6 +362,11 @@ class ZipfApp(App[None]):
         """Redraw the title bar: where you are, and which section holds it."""
         self.query_one("#brand", Static).update(views.title_line(self._view, self._section))
         self.query_one("#sections", Static).update(views.section_blocks(self._section))
+        explore_bar = self.query_one("#explore-bar", Horizontal)
+        explore_bar.display = self._section == views.SECTIONS[0]
+        self.query_one("#explore-options", Static).update(
+            views.explore_mode_blocks(self._explore_mode)
+        )
 
     def action_next_section(self) -> None:
         """Move to the next section.
@@ -364,6 +377,22 @@ class ZipfApp(App[None]):
         """
         self._section = views.next_section(self._section)
         self._show_title()
+        self.refresh_bindings()
+
+    def _select_explore_mode(self, mode: str) -> None:
+        """Open one of Explore's keyword collections."""
+        if self._section != views.SECTIONS[0]:
+            return
+        if mode == self._explore_mode and self._view.kind == views.KEYWORDS:
+            return
+        self._explore_mode = mode
+        self.show_view(View(views.KEYWORDS))
+
+    def action_explore_all(self) -> None:
+        self._select_explore_mode(views.EXPLORE_ALL)
+
+    def action_explore_watchlist(self) -> None:
+        self._select_explore_mode(views.EXPLORE_WATCHLIST)
 
     def _show_question(self, spec: TableSpec) -> None:
         """The question this view answers, and the command it makes typeable.

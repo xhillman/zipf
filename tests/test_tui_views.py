@@ -530,6 +530,13 @@ def test_blocks_keep_their_width_whichever_is_active() -> None:
     assert len(widths) == 1
 
 
+def test_explore_mode_blocks_number_and_fill_the_active_option() -> None:
+    blocks = views.explore_mode_blocks(views.EXPLORE_WATCHLIST)
+    assert blocks.count("[reverse") == 1
+    assert "[$dim] 1 All [/]" in blocks
+    assert "[reverse bold $violet] 2 Watchlist [/]" in blocks
+
+
 def test_the_title_names_the_view_only_in_explore() -> None:
     """A section with nothing behind it must not claim to be showing a view."""
     view = View(views.KEYWORDS)

@@ -71,6 +71,10 @@ QUESTIONS: Final[dict[str, str]] = {
 #: work that fills them lands, and so the title can say which one you are in.
 SECTIONS: Final[tuple[str, ...]] = ("explore", "research", "data")
 
+#: The two keyword collections available inside Explore.
+EXPLORE_ALL: Final = "all"
+EXPLORE_WATCHLIST: Final = "watchlist"
+
 #: What the title bar calls each view. Short, because it shares one line with
 #: the balance — the question below it is where a view explains itself.
 NAMES: Final[dict[str, str]] = {
@@ -577,17 +581,24 @@ def table_for(
     sort: str | None = None,
     marked: frozenset[str] = frozenset(),
     forensic: bool = False,
+    watchlisted_only: bool = False,
 ) -> TableSpec:
     """Build the table for one view selection.
 
-    ``marked`` and ``forensic`` are display state the app owns: which rows the
-    user has selected, and whether to show where each figure came from. Both are
-    passed in rather than read here so this stays a pure function of the database
-    plus a selection, and stays testable without a terminal.
+    ``marked``, ``forensic``, and ``watchlisted_only`` are display state the app
+    owns: which rows the user selected, whether to show where figures came from,
+    and which Explore collection is active. They are passed in rather than read
+    here so this stays testable without a terminal.
     """
     if view.kind == KEYWORDS:
         return _keyword_rows(
-            browse.keywords(conn, contains=contains, sort=sort, own_domain=own_domain),
+            browse.keywords(
+                conn,
+                contains=contains,
+                sort=sort,
+                own_domain=own_domain,
+                watchlisted_only=watchlisted_only,
+            ),
             sort=sort,
             marked=marked,
             forensic=forensic,
@@ -667,6 +678,15 @@ def section_blocks(active: str) -> str:
     return " ".join(
         f"[reverse bold $violet] {name} [/]" if name == active else f"[$dim] {name} [/]"
         for name in SECTIONS
+    )
+
+
+def explore_mode_blocks(active: str) -> str:
+    """The numbered All/Watchlist selector shown inside Explore."""
+    labels = ((EXPLORE_ALL, "1 All"), (EXPLORE_WATCHLIST, "2 Watchlist"))
+    return " ".join(
+        f"[reverse bold $violet] {label} [/]" if mode == active else f"[$dim] {label} [/]"
+        for mode, label in labels
     )
 
 

@@ -17,6 +17,17 @@ Screen {
     background: $background;
 }
 
+#explore-bar {
+    height: 3;
+    align: center middle;
+    background: $background;
+    border-bottom: solid $dim 25%;
+}
+
+#explore-options {
+    width: auto;
+}
+
 /* The brand and the balance take equal shares of whatever the blocks leave, so
  * the blocks land in the true middle of the bar — and stay there. Sizing either
  * side to its own text would move the blocks every time the title changed

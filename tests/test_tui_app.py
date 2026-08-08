@@ -3,8 +3,8 @@
 Textual's ``run_test`` drives a real app in a headless terminal, so these are
 integration tests over the same widgets a person sees — not renders of a mock.
 The table's *contents* are asserted in ``test_tui_views``; here the concern is
-wiring: does selecting a node change the table, does the cursor move the detail
-pane, does the app survive an empty database.
+wiring: does navigation change the table, does the cursor move the detail pane,
+does the app survive an empty database.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import respx
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Input, Static
 
+from zipf import watchlist
 from zipf.budget import Budget
 from zipf.clock import now_iso
 from zipf.db.connection import open_ro
@@ -918,6 +919,65 @@ async def test_explore_is_selected_on_startup(seeded: sqlite3.Connection) -> Non
         assert "keyword explorer" in str(app.query_one("#brand", Static).render())
         blocks = app.query_one("#sections", Static)
         assert "explore" in str(blocks.render())
+
+
+async def test_all_is_the_default_mode_below_the_title(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        title = app.query_one("#status")
+        bar = app.query_one("#explore-bar", Horizontal)
+        options = str(app.query_one("#explore-options", Static).render())
+
+        assert bar.display
+        assert bar.region.y == title.region.bottom
+        assert "1 All" in options
+        assert "2 Watchlist" in options
+
+
+async def test_two_opens_the_persistent_watchlist(seeded: sqlite3.Connection) -> None:
+    watchlist.toggle(seeded, ["best crm software"])
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        table = app.query_one("#rows", DataTable)
+
+        await pilot.press("2")
+        await pilot.pause()
+
+        assert table.row_count == 1
+        assert str(table.get_row_at(0)[0]).lstrip() == "best crm software"
+
+        await pilot.press("1")
+        await pilot.pause()
+        assert table.row_count == 2
+
+
+async def test_number_switching_is_disabled_outside_explore(
+    seeded: sqlite3.Connection,
+) -> None:
+    watchlist.toggle(seeded, ["best crm software"])
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        table = app.query_one("#rows", DataTable)
+        await pilot.press("tab")  # research
+        await pilot.press("2")
+        await pilot.pause()
+
+        assert not app.query_one("#explore-bar", Horizontal).display
+        assert table.row_count == 2
+
+        await pilot.press("tab", "tab")  # data, then explore
+        assert table.row_count == 2  # the ignored 2 did not change the mode
+
+
+async def test_number_keys_still_type_into_inputs(seeded: sqlite3.Connection) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test() as pilot:
+        await pilot.press("slash", "2")
+        assert app.query_one("#filter", Input).value == "2"
+
+        await pilot.press("escape", "colon", "1")
+        assert app.query_one("#command", Input).value == "1"
 
 
 async def test_tab_cycles_the_sections_and_retitles(seeded: sqlite3.Connection) -> None:

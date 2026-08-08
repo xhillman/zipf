@@ -120,6 +120,17 @@ def test_filter_treats_wildcards_literally(seeded: sqlite3.Connection) -> None:
     assert browse.keywords(seeded, contains="%") == []
 
 
+def test_keywords_can_be_limited_to_the_watchlist(seeded: sqlite3.Connection) -> None:
+    seeded.execute(
+        "INSERT INTO watchlist (keyword, added_at) VALUES (?, ?)",
+        ("free crm", "2026-08-07T00:00:00Z"),
+    )
+
+    rows = browse.keywords(seeded, watchlisted_only=True)
+
+    assert [row["keyword"] for row in rows] == ["free crm"]
+
+
 def test_sort_keys_are_allowlisted(seeded: sqlite3.Connection) -> None:
     """A column name never reaches SQL from input, and the refusal names the fix."""
     assert browse.keywords(seeded, sort="keyword")[0]["keyword"] == "best crm software"

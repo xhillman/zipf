@@ -152,20 +152,25 @@ def keywords(
     sort: str | None = None,
     limit: int = DEFAULT_LIMIT,
     own_domain: str | None = None,
+    watchlisted_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Every keyword in the cache, with your own rank where one is known.
 
     ``own_domain`` is passed in rather than read from settings so the same
     function serves the configured domain, a domain typed at the prompt, and a
     test. When it is absent the ``position`` column is simply NULL — the rest of
-    the row is unaffected.
+    the row is unaffected. ``watchlisted_only`` narrows the same query through
+    durable user state without changing its columns or ordering.
     """
     order = _order_by(KEYWORD_SORTS, sort)
     params: list[Any] = [own_domain]
-    where = ""
+    conditions: list[str] = []
+    if watchlisted_only:
+        conditions.append("EXISTS (SELECT 1 FROM watchlist w WHERE w.keyword = k.keyword)")
     if contains:
-        where = "WHERE k.keyword LIKE ? ESCAPE '\\'"
+        conditions.append("k.keyword LIKE ? ESCAPE '\\'")
         params.append(_contains(contains))
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     params.append(_bounded(limit))
 
     rows = conn.execute(
