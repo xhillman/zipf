@@ -71,6 +71,15 @@ class ZipfApp(App[None]):
 
     CSS_PATH = "zipf.tcss"
     TITLE = "zipf"
+    # Below eighty columns the inspector would take at least a third of the
+    # workspace, leaving too little room for the table's figures. Textual puts
+    # exactly one of these classes on the screen as the terminal is resized.
+    # Textual requires a class-level list; annotating the override as ClassVar
+    # makes mypy reject the framework's inherited instance-variable type.
+    HORIZONTAL_BREAKPOINTS = [  # noqa: RUF012
+        (0, "-compact"),
+        (80, "-standard"),
+    ]
     # Every binding is declared, and `_refresh_footer` decides which are worth
     # showing for the row you are on. Hiding a key outright would make it
     # undiscoverable; showing every key at once is a wall nobody reads.

@@ -958,6 +958,37 @@ async def test_the_inspector_sits_beside_the_table(seeded: sqlite3.Connection) -
         assert jobs.region.y > detail.region.y  # jobs sit under detail
 
 
+async def test_compact_terminal_stacks_the_inspector_below_the_table(
+    seeded: sqlite3.Connection,
+) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test(size=(79, 24)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#rows", DataTable)
+        inspector = app.query_one("#inspector", Vertical)
+        detail = app.query_one("#detail", Static)
+        jobs = app.query_one("#jobs", Static)
+
+        assert inspector.region.x == table.region.x
+        assert inspector.region.y == table.region.y + table.region.height
+        assert inspector.region.width == table.region.width
+        assert detail.region.height >= 5
+        assert jobs.region.height == 2
+
+
+async def test_standard_terminal_keeps_the_inspector_beside_the_table(
+    seeded: sqlite3.Connection,
+) -> None:
+    app = ZipfApp(seeded)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        table = app.query_one("#rows", DataTable)
+        inspector = app.query_one("#inspector", Vertical)
+
+        assert inspector.region.x > table.region.x
+        assert inspector.region.y == table.region.y
+
+
 async def test_the_inspector_does_not_swallow_a_narrow_terminal(
     seeded: sqlite3.Connection,
 ) -> None:
